@@ -1,14 +1,14 @@
 import os
 import time
 import logging
-import pandas as pd
 import requests
 import sqlite3
 from trading_helpers import get_git_repo_root
+import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def fetch_stock_data(api_key, symbol, start_date, end_date):
+def fetch_stock_data(api_key, symbol, start_date, end_date, next_url=None, limit=5000):
     """Fetches stock data from Polygon.io API.
 
     Args:
@@ -16,25 +16,32 @@ def fetch_stock_data(api_key, symbol, start_date, end_date):
         symbol (str): Stock ticker symbol.
         start_date (str): Start date in YYYY-MM-DD format.
         end_date (str): End date in YYYY-MM-DD format.
+        next_url (str, optional): URL for the next page of results. Defaults to None.
+        limit (int, optional): Number of results to return per request. Defaults to 5000.
 
     Returns:
         list: List of dictionaries, each representing a data point.
     """
 
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/5/minute/{start_date}/{end_date}"
-    url += f"?adjusted=false&sort=asc&limit=50000&apiKey={api_key}"
+    if next_url:
+        url = next_url
+        url += f"&adjusted=false&sort=asc&limit={limit}&apiKey={api_key}"
+    else:
+        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_date}/{end_date}"
+        url += f"?adjusted=false&sort=asc&limit={limit}&apiKey={api_key}"
 
+    # logging.debug(f"Getting URL: {url}")
     response = requests.get(url)
     response_json = response.json()
 
     if response.status_code == 200 and "results" in response_json:
-        return response_json["results"]
+        return response_json["results"], response_json.get("next_url")
     else:
         logging.error(f"Error fetching data: {response.status_code}")
-        return []
+        return [], None
 
 def store_stock_data(data, symbol, repo_root):
-    """Stores stock data in a SQLite database.
+    """Stores stock data in a SQLite database, with each year in a separate table.
 
     Args:
         data (list): List of dictionaries, each representing a data point.
@@ -45,41 +52,74 @@ def store_stock_data(data, symbol, repo_root):
     conn = sqlite3.connect(os.path.join(repo_root, f"{symbol}_data.db"))
     cursor = conn.cursor()
 
-    create_table_sql = f"""
-        CREATE TABLE IF NOT EXISTS {symbol}_prices (
-            epoch_time INTEGER PRIMARY KEY,
-            volume REAL,
-            v_weight_price REAL,
-            open REAL,
-            close REAL,
-            high REAL,
-            low REAL,
-            tx_cnt INTEGER
-        )
-    """
-    cursor.execute(create_table_sql)
+    for row in data:
+        epoch_time = row['t'] / 1000
+        dt_object = datetime.datetime.fromtimestamp(epoch_time)
+        year = dt_object.year  # Extract the year
+        date_str = dt_object.strftime('%Y-%m-%d')
+        time_str = dt_object.strftime('%H:%M:%S')
 
-    insert_sql = f"""
-        INSERT OR REPLACE INTO {symbol}_prices (epoch_time, volume, v_weight_price, open, close, high, low, tx_cnt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    cursor.executemany(insert_sql, [(row['t'] / 1000, row['v'], row['vw'], row['o'], row['c'], row['h'], row['l'], row['n']) for row in data])
+        table_name = f"{symbol}_prices_{year}"
+
+        create_table_sql = f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                epoch_time INTEGER PRIMARY KEY,
+                date TEXT,
+                time TEXT,
+                volume REAL,
+                v_weight_price REAL,
+                open REAL,
+                close REAL,
+                high REAL,
+                low REAL,
+                tx_cnt INTEGER
+            )
+        """
+        cursor.execute(create_table_sql)
+
+        insert_sql = f"""
+            INSERT OR IGNORE INTO {table_name} (epoch_time, date, time, volume, v_weight_price, open, close, high, low, tx_cnt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        cursor.execute(insert_sql, (epoch_time, date_str, time_str, row['v'], row['vw'], row['o'], row['c'], row['h'], row['l'], row['n']))
 
     conn.commit()
     conn.close()
 
-if __name__ == "__main__":
+def main():
+    api_key = os.environ.get('API_KEY')
+    symbol = 'SPY'
+    start_date = '2022-01-01'
+    end_date = '2024-12-26'
+    delta = datetime.timedelta(days=14)
+
     repo_root = get_git_repo_root()
     if not repo_root:
         logging.error("Not inside a Git repository.")
         exit()
+    current_date = datetime.date(2022, 1, 1)
+    while current_date <= datetime.date(2024, 12, 26):
+        start_date = current_date
+        end_date = min(current_date + delta, datetime.date(2024, 12, 26))
+        next_url = None
 
-    api_key = os.environ.get('API_KEY')
-    symbol = 'SPY'
-    start_date = '2023-01-01'
-    end_date = '2023-12-31'
+        logging.debug(f"Getting data for start date: {start_date}")
+        while True:
+            data, next_url = fetch_stock_data(api_key, symbol, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), next_url)
+            if not data:
+                break
 
-    logging.debug(f"API KEY: {api_key}")
-    logging.debug(f"Repo Root: {repo_root}")
-    # data = fetch_stock_data(api_key, symbol, start_date, end_date)
-    # store_stock_data(data, symbol, repo_root)
+            store_stock_data(data, symbol, repo_root)
+            if not next_url:
+                break
+            time.sleep(1)
+        current_date += delta + datetime.timedelta(days=1)
+        time.sleep(1)
+
+if __name__ == "__main__":
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    os.chdir(script_dir)
+
+    main()
+    
