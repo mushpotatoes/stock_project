@@ -111,6 +111,7 @@ def main():
     all_dates = df['date_only'].unique()
     all_dates = sorted(all_dates)
     leave = False
+    min_vals = [float("inf"), float("inf"), float("inf"), float("inf")]
     for date_str in tqdm(all_dates, desc="Processing days", unit="day"):
         # if date_str in ["2020-02-27"]:
         #     continue
@@ -155,18 +156,27 @@ def main():
                 # print((day_subslice.loc[:, 'sma_15'] / first_close) - 1)
                 # if count > 5:
                 #     exit()
+                data_offset = 0
                 day_subslice.loc[:, 'sma_15'] = (
                     (day_subslice.loc[:, 'sma_15'] / first_close) - 1
-                ) * 100
+                ) * 100 + data_offset
+                if min_vals[0] > day_subslice.loc[:, 'sma_15'].min():
+                    min_vals[0] = day_subslice.loc[:, 'sma_15'].min()
                 day_subslice.loc[:, 'sma_25'] = (
                     (day_subslice.loc[:, 'sma_25'] / first_close) - 1
-                ) * 100
+                ) * 100 + data_offset
+                if min_vals[1] > day_subslice.loc[:, 'sma_25'].min():
+                    min_vals[1] = day_subslice.loc[:, 'sma_25'].min()
                 day_subslice.loc[:, 'sma_100'] = (
                     (day_subslice.loc[:, 'sma_100'] / first_close) - 1
-                ) * 100
+                ) * 100 + data_offset
+                if min_vals[2] > day_subslice.loc[:, 'sma_100'].min():
+                    min_vals[2] = day_subslice.loc[:, 'sma_100'].min()
                 day_subslice.loc[:, 'close'] = (
                     (day_subslice.loc[:, 'close'] / first_close) - 1
-                ) * 100
+                ) * 100 + data_offset
+                if min_vals[3] > day_subslice.loc[:, 'close'].min():
+                    min_vals[3] = day_subslice.loc[:, 'close'].min()
 
                 # print(day_slice_targets)
                 # print(day_subslice)
@@ -199,11 +209,11 @@ def main():
                 if (np.abs(1 - max_change) > np.abs(1 - min_change)):
                     # print("greater max")
                     # print([1 - max_change, (max_idx + minutes_offset)/60])
-                    target_tensors.append([(1 - max_change)*100, (max_idx + minutes_offset)/60])
+                    target_tensors.append([((1 - max_change)*100) + data_offset, (max_idx + minutes_offset)/60])
                 else:
                     # print("greater min")
                     # print([1 - min_change, (min_idx + minutes_offset)/60])
-                    target_tensors.append([(1 - min_change)*100, (min_idx + minutes_offset)/60])
+                    target_tensors.append([((1 - min_change)*100) + data_offset, (min_idx + minutes_offset)/60])
                 # exit()
                 
                 # Convert to numpy, shape becomes (40, 5). Then transpose for (5, 40).
@@ -214,7 +224,7 @@ def main():
                 daily_tensors.append(subslice_tensor)
         # if leave:
         #     break
-
+    print(f"Min values are: {min_vals}")
     print(f"{num_days_above_threshold} with values above {threshold}")
     # Now daily_tensors is a list of arrays, each shape = (5, 40).
     # You could convert to a single 3D NumPy array, if desired, by:
