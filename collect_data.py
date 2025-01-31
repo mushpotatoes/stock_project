@@ -89,18 +89,18 @@ def store_stock_data(data, symbol, repo_root):
 def main():
     api_key = os.environ.get('API_KEY')
     symbol = 'SPY'
-    start_date = '2024-12-26'
-    end_date = '2025-01-26'
+    start_date = '2025-01-26'
+    end_date = '2025-01-28'
     delta = datetime.timedelta(days=14)
 
     repo_root = get_git_repo_root()
     if not repo_root:
         logging.error("Not inside a Git repository.")
         exit()
-    current_date = datetime.date(2024, 12, 26)
-    while current_date <= datetime.date(2025, 1, 26):
+    current_date = datetime.date(2025, 1, 26)
+    while current_date <= datetime.date(2025, 1, 28):
         start_date = current_date
-        end_date = min(current_date + delta, datetime.date(2025, 1, 26))
+        end_date = min(current_date + delta, datetime.date(2025, 1, 28))
         next_url = None
 
         logging.debug(f"Getting data for start date: {start_date}")
