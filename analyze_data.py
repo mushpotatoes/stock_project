@@ -31,7 +31,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send"
 ]
 
-def gmail_create_draft_with_attachment(creds):
+def gmail_create_draft_with_attachment(creds, body="Hello,\n\nThis is an automated mail with attachment.\nPlease do not reply."):
     """
     Create a draft email with attachment, then return the draft object.
     """
@@ -48,9 +48,7 @@ def gmail_create_draft_with_attachment(creds):
         mime_message["Subject"] = f"POI on {formatted_date}"
 
         # Email text
-        mime_message.set_content(
-            "Hello,\n\nThis is an automated mail with attachment.\nPlease do not reply."
-        )
+        mime_message.set_content(body)
 
         # Identify the path and attach a file
         attachment_filename = f"plots/close_{formatted_date}.png"
@@ -116,6 +114,35 @@ def on_interval_elapsed(df):
       - Etc.
     """
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Interval event triggered.")
+    creds = None
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+
+    # If there are no valid credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "credentials.json", SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+
+    # 3. Create a draft with attachment
+    draft = gmail_create_draft_with_attachment(creds, "Triggered by interval")
+    if draft is None:
+        print("Failed to create draft.")
+        return
+
+    # 4. Send the draft
+    draft_id = draft["id"]
+    sent_msg = gmail_send_draft(draft_id, creds)
+    if sent_msg:
+        print("Email successfully sent.")
+    else:
+        print("Failed to send the email.")
 
 
 def on_new_local_minimum_found(min_idx, min_value, df):
@@ -140,7 +167,7 @@ def on_new_local_minimum_found(min_idx, min_value, df):
             token.write(creds.to_json())
 
     # 3. Create a draft with attachment
-    draft = gmail_create_draft_with_attachment(creds)
+    draft = gmail_create_draft_with_attachment(creds, "Triggered by minimum slope")
     if draft is None:
         print("Failed to create draft.")
         return
@@ -181,7 +208,11 @@ def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None
 
         # Download daily data (use interval="1m" if you actually need intraday 
         # data and have yfinance privileges to do so)
-        data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
+        try:
+            data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
+        except:
+            print("Failed to download data")
+            return None
 
         if data.empty:
             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
@@ -463,6 +494,7 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     # Convert 'time' to a proper datetime so Matplotlib can do time-based plotting
     day_df['time'] = pd.to_datetime(day_df['time'], format="%H:%M:%S")
 
+    # print(f"processing {date_str}")
     # Compute MAs if requested
     if config.add_moving_averages and config.ma_windows:
         for window in config.ma_windows:
@@ -505,8 +537,10 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         return  # We won't do any actual plotting
 
     # Create figure with 3 subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex=True, figsize=(16, 12))
-    fig.suptitle(f"Close + RSI + MA_25 Slope - {date_str}", fontsize=14)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12))
+    ax3.sharex(ax1)
+    # fig.suptitle(f"Close + RSI + MA_25 Slope - {date_str}", fontsize=14)
+    fig.suptitle(f"Close + FFT(Slope) + Slope - {date_str}", fontsize=14)
 
     # 1) Top subplot: Close + MAs
     ax1.plot(day_df_plot['time'], day_df_plot['close'], label='Close', color='blue')
@@ -518,18 +552,66 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     ax1.legend(loc='upper left')
     ax1.grid(True)
 
-    # 2) Middle subplot: RSI
-    if config.add_rsi:
-        ax2.plot(day_df_plot['time'], day_df_plot['RSI_14'], color='purple', label='RSI (14)')
-        ax2.axhline(70, color='red', linestyle='--', alpha=0.7)
-        ax2.axhline(30, color='green', linestyle='--', alpha=0.7)
-        ax2.set_ylabel('RSI')
-        ax2.legend(loc='upper left')
+    # ------------------ 2) MIDDLE SUBPLOT: FFT of 'chosen_slope' ------------------
+    # Drop NaNs before FFT
+    slope_data = day_df_plot['chosen_slope'].dropna()
+    N = len(slope_data)
+    if N > 1:
+        fft_values = np.fft.fft(slope_data)
+        freqs = np.fft.fftfreq(N, d=1/60)  # d=1 => each sample is "1 step" apart
+
+        # Plot only the first half of frequencies (0 .. N/2) if you want the standard real-valued spectrum
+        half_N = N // 2
+        abs_vals = np.abs(fft_values)[:half_N]
+        idx_top = np.argsort(abs_vals)[-3:]   # grabs the last 3 indices (largest)
+        top_freqs = freqs[:half_N][idx_top]
+        top_mags = abs_vals[idx_top]
+        info_str = "Top 3 peaks:\n"
+        for f, m in sorted(zip(top_freqs, top_mags), key=lambda x: -x[1]):
+            info_str += f"freq = {f:.2f}, mag = {m:.2f}\n"
+        ax2.text(
+            0.1, 0.95,
+            info_str,
+            transform=ax2.transAxes,
+            va='top', ha='left',
+            fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
+
+
+        ax2.plot(freqs[:half_N], np.abs(fft_values)[:half_N], color='purple', label='FFT of Slope')
+        # ax2.set_xlim([0, freqs[half_N - 1]])
+        ax2.set_xlim([0, 10])
+        ax2.set_ylabel('FFT Magnitude')
+        # ax2.legend(loc='upper left')
         ax2.grid(True)
+        tick_positions = np.arange(0, freqs[half_N - 1], 1)
+        ax2.set_xticks(tick_positions)
+        # optionally also set custom labels
+        ax2.set_xticklabels([f"{pos:.1f}" for pos in tick_positions])
+
+        f_min = 1.0  # 1 cycle/hour => once every 60 minutes
+        f_max = 2.0  # 2 cycles/hour => once every 30 minutes
+
+        # Add shading for that frequency band:
+        ax2.axvspan(f_min, f_max, color='grey', alpha=0.3)
+
+
     else:
-        ax2.text(0.5, 0.5, "RSI Disabled", ha='center', va='center', fontsize=12)
-        ax2.set_ylabel('RSI')
+        ax2.text(0.5, 0.5, "Insufficient data for FFT", ha='center', va='center', fontsize=12)
         ax2.grid(True)
+    # # 2) Middle subplot: RSI
+    # if config.add_rsi:
+    #     ax2.plot(day_df_plot['time'], day_df_plot['RSI_14'], color='purple', label='RSI (14)')
+    #     ax2.axhline(70, color='red', linestyle='--', alpha=0.7)
+    #     ax2.axhline(30, color='green', linestyle='--', alpha=0.7)
+    #     ax2.set_ylabel('RSI')
+    #     ax2.legend(loc='upper left')
+    #     ax2.grid(True)
+    # else:
+    #     ax2.text(0.5, 0.5, "RSI Disabled", ha='center', va='center', fontsize=12)
+    #     ax2.set_ylabel('RSI')
+    #     ax2.grid(True)
 
     # 3) Bottom subplot: chosen slope
     ax3.plot(day_df_plot['time'], day_df_plot['chosen_slope'], label='Chosen Slope', color='orange')
@@ -537,6 +619,10 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     ax3.set_xlabel('Time of Day')
     ax3.grid(True)
     ax3.legend(loc='upper left')
+    average_slope = day_df_plot['chosen_slope'].mean()
+    ax3.axhline(y=average_slope, color='red', linestyle='--', label=f'Average Slope: {average_slope:.2f}')  # Customize color and style
+
+
 
     # Highlight runs of negative slope if enabled
     if config.highlight_negative_slope_runs:
@@ -588,7 +674,7 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
                 runs.append((start_idx, len(below_mask) - 1))
 
         for (start, end) in runs:
-            start_time = day_df_plot.iloc[start]['time']
+            start_time = day_df_plot.iloc[start+30]['time']
             end_time   = day_df_plot.iloc[end]['time']
             for ax in (ax1, ax2, ax3):
                 ax.axvspan(start_time, end_time, color='lightgreen', alpha=0.3)
@@ -600,7 +686,7 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         end_local   = pd.to_datetime("13:30:00").time()
         mask_local = (day_df['time'].dt.time >= start_local) & (day_df['time'].dt.time <= end_local)
         df_local = day_df.loc[mask_local].copy().reset_index(drop=True)
-        local_min_indices = find_local_minima(df_local['chosen_slope'], threshold=-0.12)
+        local_min_indices = find_local_minima(df_local['chosen_slope'], threshold=-0.09)
 
         # for index in local_min_indices:
         #     print(f"{index}: {day_df['chosen_slope'].iloc[index]}")
@@ -689,7 +775,7 @@ def compute_daily_stats(
         return maxima_indices
 
     # Find local minima below 0.0 slope, for example
-    local_min_indices = find_local_minima(day_df['chosen_slope'], threshold=-0.1)
+    local_min_indices = find_local_minima(day_df['chosen_slope'], threshold=-0.09)
     
     maxima_all = find_local_maxima(day_df['chosen_slope'], threshold=0.03)
     max_set = set(maxima_all)
@@ -754,9 +840,12 @@ def run_analysis(
         return
 
     df = load_and_sort_stock_data(symbol, repo_root, use_yahoo=use_yahoo, start_date=start_date, end_date=end_date)
+    if df is None:
+        return None
     ret_df = df.copy(deep=True)
 
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    # print(date_range)
     all_stats = []
 
     for single_date in date_range:
@@ -799,7 +888,7 @@ def run_analysis(
 ###############################################################################
 # Core loop that runs every minute
 ###############################################################################
-def start_monitoring(symbol="SPY", minutes_interval=5, config: PlotConfig = None):
+def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = None):
     """
     Example function that (1) fetches or analyzes data every minute,
     (2) triggers on_interval_elapsed() every 'minutes_interval' minutes,
@@ -828,14 +917,23 @@ def start_monitoring(symbol="SPY", minutes_interval=5, config: PlotConfig = None
         # For demonstration, assume we have some df we can pass to a function:
         
         # You can adjust the date range to multiple months or years
+        
+        today = datetime.date.today()
+        formatted_today = today.strftime("%Y-%m-%d")
+        tomorrow = today + datetime.timedelta(days=1)
+        formatted_tomorrow = tomorrow.strftime("%Y-%m-%d")
+
         df = run_analysis(
             symbol="SPY",
-            start_date="2025-01-30",
-            end_date="2025-02-01",
+            start_date=formatted_today,
+            end_date=formatted_tomorrow,
             plot_config=config,
             collect_stats=True,
             use_yahoo = True
         )
+        if df is None:
+            time.sleep(60)
+            continue
         # print(df)
 
         # # Fake DataFrame with random 'close' values for this demonstration
@@ -865,7 +963,7 @@ def start_monitoring(symbol="SPY", minutes_interval=5, config: PlotConfig = None
             slope_of_best_fit, raw=True
         )
         
-        local_min_indices = find_local_minima(df['chosen_slope'], threshold=-0.1)
+        local_min_indices = find_local_minima(df['chosen_slope'], threshold=-0.09)
         # local_min_indices = []
         # arr = df["close"].to_numpy()
         # for i in range(1, len(arr) - 1):
@@ -874,8 +972,9 @@ def start_monitoring(symbol="SPY", minutes_interval=5, config: PlotConfig = None
         # print(local_min_indices)
 
         # Convert to a set for easier comparison
-        current_idx = max(local_min_indices)
-        current_time = df["epoch_time"].iloc[max(local_min_indices)]
+        if (len(local_min_indices) > 0):
+            current_idx = max(local_min_indices)
+            current_time = df["epoch_time"].iloc[max(local_min_indices)]
         # print(df["epoch_time"].iloc[max(local_min_indices)])
         # exit()
         if (len(local_min_indices) > 0) and (current_minima != current_time):
@@ -931,6 +1030,14 @@ if __name__ == "__main__":
     )
 
     start_monitoring(config=config)
+    # df = run_analysis(
+    #     symbol="SPY",
+    #     start_date="2020-01-31",
+    #     end_date="2025-02-01",
+    #     plot_config=config,
+    #     collect_stats=True,
+    #     use_yahoo = False
+    # )
 
     # # stats now holds a DataFrame with columns like ["date", "daily_min_slope"]
     # print(stats)

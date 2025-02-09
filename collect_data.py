@@ -90,7 +90,9 @@ def main():
     api_key = os.environ.get('API_KEY')
     symbol = 'SPY'
     start_date = '2025-01-26'
-    end_date = '2025-01-28'
+    today = datetime.date.today()
+    end_date = today.strftime("%Y-%m-%d")
+    # end_date = '2025-01-28'
     delta = datetime.timedelta(days=14)
 
     repo_root = get_git_repo_root()
@@ -98,14 +100,14 @@ def main():
         logging.error("Not inside a Git repository.")
         exit()
     current_date = datetime.date(2025, 1, 26)
-    while current_date <= datetime.date(2025, 1, 28):
+    while current_date <= datetime.date(today.year, today.month, today.day):
         start_date = current_date
-        end_date = min(current_date + delta, datetime.date(2025, 1, 28))
+        end_date = min(current_date + delta, datetime.date(today.year, today.month, today.day))
         next_url = None
 
         logging.debug(f"Getting data for start date: {start_date}")
         while True:
-            data, next_url = fetch_stock_data(api_key, symbol, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), next_url)
+            data, next_url = fetch_stock_data(api_key, symbol, start_date.strftime('%Y-%m-%d'), end_date, next_url)
             if not data:
                 break
 
