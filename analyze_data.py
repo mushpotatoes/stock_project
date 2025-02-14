@@ -1,5 +1,6 @@
 import os
 import datetime
+import pickle
 import sqlite3
 import time
 
@@ -15,6 +16,13 @@ from email.mime.audio import MIMEAudio
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email.mime.text import MIMEText
+import warnings
+
+import pytz
+import requests
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 
 import google.auth
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -115,6 +123,14 @@ def on_interval_elapsed(df):
     """
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Interval event triggered.")
     creds = None
+    # flow = InstalledAppFlow.from_client_secrets_file(
+    #     "credentials.json", SCOPES
+    # )
+    # creds = flow.run_local_server(port=0)
+    # with open("token.json", "w") as token:
+    #     token.write(creds.to_json())
+    # exit()
+
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
 
@@ -149,7 +165,7 @@ def on_new_local_minimum_found(min_idx, min_value, df):
     """
     Called each time a NEW local minimum is found (an index that wasn't found before).
     """
-    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] New local minimum at index={min_idx}, value={min_value}")
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] New local minimum at index={min_idx} [{df["time"].iloc[min_idx]}], value={min_value}")
     creds = None
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
@@ -181,24 +197,233 @@ def on_new_local_minimum_found(min_idx, min_value, df):
         print("Failed to send the email.")
 
 
+def get_recent_purple_start_in_green(day_df_plot, predicted_classes):
+    """
+    Returns the timestamp of the beginning of the most recent purple section 
+    (i.e. a segment where predicted_classes==1 for at least 3 consecutive points)
+    that occurs inside of a green section (i.e. where MA_25 is below MA_100 for 
+    more than 30 consecutive points, with a 30-point offset).
+    
+    If no such purple section is found, returns None.
+    """
+    # --- Identify Purple Runs ---
+    purple_runs = []
+    n = len(predicted_classes)
+    i = 0
+    while i < n:
+        if predicted_classes[i] == 1:
+            start = i
+            while i < n and predicted_classes[i] == 1:
+                i += 1
+            end = i - 1
+            if (end - start + 1) >= 3:
+                purple_runs.append((start, end))
+        else:
+            i += 1
+
+    # Get the starting timestamp for each purple run
+    purple_start_times = []
+    for start, _ in purple_runs:
+        # Get the timestamp at which this purple section starts.
+        p_time = day_df_plot.iloc[start]['time']
+        purple_start_times.append(p_time)
+
+    # --- Identify Green Runs ---
+    # Here we assume that a green run is defined using:
+    # below_mask = (MA_100 - MA_25) > 0, and only runs longer than 30 points are considered.
+    below_mask = (day_df_plot['MA_100'] - day_df_plot['MA_25']) > 0
+    green_runs = []
+    start_idx = None
+    for i in range(len(below_mask)):
+        if below_mask[i] and start_idx is None:
+            start_idx = i
+        elif not below_mask[i] and start_idx is not None:
+            run_length = i - start_idx
+            if run_length > 30:
+                # Note the green overlay starts at start_idx+30, per your plotting code.
+                green_start = day_df_plot.iloc[start_idx + 30]['time']
+                green_end = day_df_plot.iloc[i - 1]['time']
+                green_runs.append((green_start, green_end))
+            start_idx = None
+    # Check if the green run extends to the end of the DataFrame.
+    if start_idx is not None:
+        run_length = len(below_mask) - start_idx
+        if run_length > 30:
+            green_start = day_df_plot.iloc[start_idx + 30]['time']
+            green_end = day_df_plot.iloc[len(below_mask) - 1]['time']
+            green_runs.append((green_start, green_end))
+
+    # --- Find Purple Sections That Occur Inside a Green Section ---
+    purple_inside_green = []
+    for p_time in purple_start_times:
+        for g_start, g_end in green_runs:
+            if g_start <= p_time <= g_end:
+                purple_inside_green.append(p_time)
+                break  # once found inside a green section, no need to check further
+
+    if not purple_inside_green:
+        return None
+
+    # --- Return the Most Recent Purple Section Start Timestamp ---
+    # "Most recent" is the one with the maximum (latest) timestamp.
+    most_recent_timestamp = max(purple_inside_green)
+    return most_recent_timestamp
+import pandas as pd  # ensure pandas is imported
+
+def get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes):
+    """
+    Returns the timestamp at which the most recent purple section (i.e. a consecutive
+    segment where predicted_classes == 1) that lasts longer than 5 minutes begins.
+    
+    A purple section's duration is determined by subtracting the timestamp at its start
+    from the timestamp at its end (as found in day_df_plot['time']).
+    
+    If no purple section longer than 5 minutes is found, returns None.
+    """
+    
+    # --- Identify Purple Runs and Filter by Duration ---
+    purple_runs = []  # to hold tuples of (start_index, end_index)
+    n = len(predicted_classes)
+    i = 0
+    
+    while i < n:
+        if predicted_classes[i] == 1:
+            # Mark the start of a purple run.
+            start = i
+            while i < n and predicted_classes[i] == 1:
+                i += 1
+            # The run ends at the previous index.
+            end = i - 1
+            
+            # Retrieve start and end timestamps.
+            start_time = day_df_plot.iloc[start]['time']
+            end_time = day_df_plot.iloc[end]['time']
+            
+            # Check if the run lasts longer than 5 minutes.
+            if end_time - start_time > pd.Timedelta(minutes=5):
+                purple_runs.append((start, end))
+        else:
+            i += 1
+
+    if not purple_runs:
+        return None
+
+    # --- Retrieve the Start Times of the Qualified Purple Runs ---
+    purple_start_times = [day_df_plot.iloc[start]['time'] for start, _ in purple_runs]
+    
+    # --- Return the Most Recent (Latest) Start Time ---
+    most_recent_timestamp = max(purple_start_times)
+    return most_recent_timestamp
 
 ###############################################################################
 #                         1. DATA LOADING & FILTERING                         #
 ###############################################################################
+central = pytz.timezone('US/Central')
+
+# def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None, end_date=None):
+#     """
+#     Load stock data either from a local SQLite DB (default) or from Yahoo Finance
+#     if use_yahoo=True.  For Yahoo Finance, you can optionally provide date range
+#     strings (YYYY-MM-DD) for start_date/end_date.
+#     Returns a DataFrame with at least:
+#        ['epoch_time', 'open', 'high', 'low', 'close', 'volume', 'time']
+#     sorted by 'epoch_time'.
+#     """
+
+#     if use_yahoo:
+#         import yfinance as yf
+#         import datetime
+
+#         # If no date range is given, pick something reasonable
+#         if start_date is None:
+#             start_date = "2020-01-01"
+#         if end_date is None:
+#             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+
+#         # Download daily data (use interval="1m" if you actually need intraday 
+#         # data and have yfinance privileges to do so)
+#         try:
+#             data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
+#         except:
+#             print("Failed to download data")
+#             return None
+
+#         if data.empty:
+#             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
+#             return pd.DataFrame()
+
+#         # Reset index so 'Date' becomes a regular column
+#         data.reset_index(inplace=True)
+
+#         # Rename columns to align with existing usage
+#         data.rename(
+#             columns={
+#                 'Datetime': 'date',
+#                 'Open': 'open',
+#                 'High': 'high',
+#                 'Low': 'low',
+#                 'Close': 'close',
+#                 'Adj Close': 'adj_close',  # in case you want it
+#                 'Volume': 'volume'
+#             },
+#             inplace=True
+#         )
+#         # print(data)
+#         # exit()
+
+#         # Convert date to epoch_time
+#         data['date'] = data['date'] - pd.Timedelta(hours=1)
+#         data['epoch_time'] = data['date'].apply(lambda dt: dt.timestamp())
+
+#         # Generate a 'time' column if downstream code expects it:
+#         # (for daily data, just use "00:00:00" or format the date if you like)
+#         data['time'] = data['date'].dt.strftime("%H:%M:%S")
+#         data['close'] = data['close'].round(2)
+
+
+#         # Sort and re-index
+#         data.sort_values(by='epoch_time', inplace=True)
+#         data.reset_index(drop=True, inplace=True)
+#         return data
+
+#     else:
+#         # Original LOCAL-SQLITE logic:
+#         import sqlite3
+#         import os
+
+#         db_path = os.path.join(repo_root, f"{symbol}_data.db")
+#         conn = sqlite3.connect(db_path)
+#         cursor = conn.cursor()
+
+#         # Get all table names in the SQLite database
+#         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+#         table_names = [row[0] for row in cursor.fetchall()]
+
+#         # Load each table into a list of DataFrames
+#         df_list = []
+#         for table_name in table_names:
+#             query = f"SELECT * FROM {table_name}"
+#             df_list.append(pd.read_sql_query(query, conn))
+
+#         conn.close()
+
+#         # Concatenate all DataFrames and sort by 'epoch_time'
+#         df = pd.concat(df_list, ignore_index=True)
+#         df.sort_values(by='epoch_time', inplace=True)
+#         df.reset_index(drop=True, inplace=True)
+#         return df
 
 def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None, end_date=None):
     """
-    Load stock data either from a local SQLite DB (default) or from Yahoo Finance
-    if use_yahoo=True.  For Yahoo Finance, you can optionally provide date range
-    strings (YYYY-MM-DD) for start_date/end_date.
+    Load stock data either from Yahoo Finance (if use_yahoo=True) or from the Polygon API by default.
+    For Yahoo Finance, you can optionally provide date range strings (YYYY-MM-DD) for start_date/end_date.
+    
     Returns a DataFrame with at least:
        ['epoch_time', 'open', 'high', 'low', 'close', 'volume', 'time']
     sorted by 'epoch_time'.
     """
-
     if use_yahoo:
         import yfinance as yf
-        import datetime
 
         # If no date range is given, pick something reasonable
         if start_date is None:
@@ -206,22 +431,18 @@ def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None
         if end_date is None:
             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
 
-        # Download daily data (use interval="1m" if you actually need intraday 
-        # data and have yfinance privileges to do so)
+        # Download daily data (use interval="1m" if you need intraday data)
         try:
             data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
-        except:
-            print("Failed to download data")
+        except Exception as e:
+            print("Failed to download data from Yahoo Finance:", e)
             return None
 
         if data.empty:
             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
             return pd.DataFrame()
 
-        # Reset index so 'Date' becomes a regular column
         data.reset_index(inplace=True)
-
-        # Rename columns to align with existing usage
         data.rename(
             columns={
                 'Datetime': 'date',
@@ -229,53 +450,83 @@ def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None
                 'High': 'high',
                 'Low': 'low',
                 'Close': 'close',
-                'Adj Close': 'adj_close',  # in case you want it
+                'Adj Close': 'adj_close',  # optional
                 'Volume': 'volume'
             },
             inplace=True
         )
-        # print(data)
-        # exit()
-
-        # Convert date to epoch_time
+        # Adjust time, convert to epoch, and create a 'time' column.
         data['date'] = data['date'] - pd.Timedelta(hours=1)
         data['epoch_time'] = data['date'].apply(lambda dt: dt.timestamp())
-
-        # Generate a 'time' column if downstream code expects it:
-        # (for daily data, just use "00:00:00" or format the date if you like)
         data['time'] = data['date'].dt.strftime("%H:%M:%S")
-
-        # Sort and re-index
+        data['close'] = data['close'].round(2)
         data.sort_values(by='epoch_time', inplace=True)
         data.reset_index(drop=True, inplace=True)
         return data
 
     else:
-        # Original LOCAL-SQLITE logic:
-        import sqlite3
-        import os
+        # --- POLYGON API BRANCH ---
+        # Use Polygon API by default rather than local SQLite.
+        # If no date range is provided, use defaults.
+        if start_date is None:
+            start_date = "2020-01-01"
+        if end_date is None:
+            end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+            
+        api_key = os.environ.get('API_KEY')
+        if not api_key:
+            print("Polygon API key not found in environment variable 'API_KEY'.")
+            return pd.DataFrame()
 
-        db_path = os.path.join(repo_root, f"{symbol}_data.db")
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        limit = 5000  # or adjust as needed
+        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_date}/{end_date}"
+        url += f"?adjusted=false&sort=asc&limit={limit}&apiKey={api_key}"
+        
+        response = requests.get(url)
+        response_json = response.json()
+        
+        if response.status_code == 200 and "results" in response_json:
+            results = response_json["results"]
+        else:
+            print(f"No Polygon data retrieved for {symbol} from {start_date} to {end_date}.")
+            return pd.DataFrame()
+        
+        # Convert results (a list of dictionaries) into a DataFrame.
+        data = pd.DataFrame(results)
+        # Polygon's field definitions:
+        #   t: timestamp (in milliseconds)
+        #   o: open, h: high, l: low, c: close, v: volume, n: number of trades.
+        new_data = pd.DataFrame({
+            'epoch_time': [item['t'] / 1000.0 for item in results],  # Convert ms to seconds
+            # 'date': [pd.to_datetime(item['t'], unit='ms') for item in results],
+            'date': [pd.to_datetime(item['t'], unit='ms', utc=True)
+                    .tz_convert(central).strftime("%Y-%m-%d") for item in results],
+            'time': [pd.to_datetime(item['t'], unit='ms', utc=True)
+                    .tz_convert(central).strftime("%H:%M:%S") for item in results],
+            # 'date': [pd.to_datetime(item['t'], unit='ms').strftime("%Y-%m-%d") for item in results],
+            # 'time': [pd.to_datetime(item['t'], unit='ms').strftime("%H:%M:%S") for item in results],
+            'open':  [item['o'] for item in results],
+            'high':  [item['h'] for item in results],
+            'low':   [item['l'] for item in results],
+            'close': [round(item['c'], 2) for item in results],
+            'volume':[item['v'] for item in results]
+        })
 
-        # Get all table names in the SQLite database
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        table_names = [row[0] for row in cursor.fetchall()]
-
-        # Load each table into a list of DataFrames
-        df_list = []
-        for table_name in table_names:
-            query = f"SELECT * FROM {table_name}"
-            df_list.append(pd.read_sql_query(query, conn))
-
-        conn.close()
-
-        # Concatenate all DataFrames and sort by 'epoch_time'
-        df = pd.concat(df_list, ignore_index=True)
-        df.sort_values(by='epoch_time', inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        return df
+        # data['epoch_time'] = data['t'] / 1000.0   # Convert ms to seconds.
+        # data['open']  = data['o']
+        # data['high']  = data['h']
+        # data['low']   = data['l']
+        # data['close'] = data['c'].round(2)
+        # data['volume'] = data['v']
+        # Create a 'time' column based on the epoch_time.
+        # new_data['time'] = pd.to_datetime(new_data['epoch_time'], unit='s').dt.strftime("%H:%M:%S")
+        
+        new_data.sort_values(by='epoch_time', inplace=True)
+        new_data.reset_index(drop=True, inplace=True)
+        # print(new_data)
+        # print(new_data.columns)
+        # exit()
+        return new_data
 
 
 
@@ -411,7 +662,8 @@ class PlotConfig:
         # More advanced features:
         highlight_negative_slope_runs: bool = True,
         highlight_below_ma_runs: bool = True,
-        find_local_minima_in_slope: bool = False
+        find_local_minima_in_slope: bool = False,
+        rand_forest_class = None
     ):
         self.show_plots = show_plots
         self.save_plots = save_plots
@@ -431,6 +683,7 @@ class PlotConfig:
         self.highlight_negative_slope_runs = highlight_negative_slope_runs
         self.highlight_below_ma_runs = highlight_below_ma_runs
         self.find_local_minima_in_slope = find_local_minima_in_slope
+        self.rand_forest_class = rand_forest_class
 
 
 def plot_volume_chart_for_day(day_df, date_str, config: PlotConfig):
@@ -533,9 +786,19 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     else:
         day_df_plot = day_df.copy()
 
+    # print(day_df_plot)
     if not config.show_plots and not config.save_plots:
         return  # We won't do any actual plotting
+    # print(len(day_df_plot))
+    # exit()
+    if len(day_df_plot) != 0:
+        forest_day_df = prepare_normalized_features(day_df_plot)
+        predicted_classes = config.rand_forest_class.predict(forest_day_df)
+    else:
+        predicted_classes = []
 
+    # print(forest_day_df)
+    # exit()
     # Create figure with 3 subplots
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12))
     ax3.sharex(ax1)
@@ -551,6 +814,26 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     ax1.set_ylabel('Close')
     ax1.legend(loc='upper left')
     ax1.grid(True)
+    # --- Overlay light purple boxes on ax1 for segments where predicted class == 1 for at least 3 consecutive points.
+    runs = []
+    n = len(predicted_classes)
+    i = 0
+    while i < n:
+        if predicted_classes[i] == 1:
+            start = i
+            while i < n and predicted_classes[i] == 1:
+                i += 1
+            end = i - 1
+            if (end - start + 1) >= 3:
+                runs.append((start, end))
+        else:
+            i += 1
+    for start, end in runs:
+        start_time_val = day_df_plot.iloc[start]['time']
+        end_time_val = day_df_plot.iloc[end]['time']
+        # axvspan will overlay a box between these times.
+        ax1.axvspan(start_time_val, end_time_val, facecolor='plum', alpha=0.3, edgecolor='purple', linewidth=2)
+    # --- End of classification overlay.
 
     # ------------------ 2) MIDDLE SUBPLOT: FFT of 'chosen_slope' ------------------
     # Drop NaNs before FFT
@@ -711,6 +994,12 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         plt.close(fig)
     elif config.show_plots:
         plt.show()
+    recent_time = get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes)
+    if recent_time:
+        print(f"[{date_str}]: Most recent purple section (long run) starts at: {recent_time.strftime('%H:%M')}")
+        return recent_time.strftime('%H:%M')
+    else:
+        return None
 
 
 
@@ -812,7 +1101,100 @@ def compute_daily_stats(
     }
     return stats
 
+def prepare_normalized_features(df):
+    """
+    Processes an input DataFrame with columns:
+      - 'date'
+      - 'time' (string formatted as '%H:%M:%S')
+      - 'close'
+      - 'MA_15'  (to be renamed to 'SMA_15')
+      - 'MA_25'  (to be renamed to 'SMA_25')
+      - 'MA_100' (to be renamed to 'SMA_100')
+      - 'chosen_slope' (to be renamed to 'slope_10')
+    
+    The function performs the following steps:
+      1. Converts the 'time' column to datetime.time.
+      2. For each day (grouped by 'date'), finds the close value at 8:30 and uses it to normalize
+         the 'close' and MA columns.
+      3. Renames the columns to 'SMA_15', 'SMA_25', 'SMA_100', and 'slope_10'.
+      4. Computes three run-length features (per day):
+           - sma_25_below_100_run_length: the run length (in rows) for which SMA_25 < SMA_100.
+           - negative_slope_run_length: the run length for which slope_10 < 0.
+           - positive_slope_run_length: the run length for which slope_10 > 0.
+      5. Returns a new DataFrame with columns in the following order:
+         [close, SMA_100, SMA_25, SMA_15, slope_10,
+          sma_25_below_100_run_length, negative_slope_run_length, positive_slope_run_length]
+    
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+    
+    Returns:
+        pd.DataFrame: The processed DataFrame with normalized values and run-length features.
+    """
+    # Ensure the 'time' column is in datetime.time format.
+    df = df.copy()
+    df['time'] = pd.to_datetime(df['time'], format='%H:%M:%S').dt.time
 
+    # Define the normalization time.
+    norm_time = pd.to_datetime("08:30", format='%H:%M').time()
+    
+    # Function to normalize a day's data using the close at 8:30.
+    def normalize_group(group):
+        norm_rows = group[group['time'] == norm_time]
+        if norm_rows.empty:
+            # Fallback: if no row at 08:30, use the first row's close.
+            norm_val = group.iloc[0]['close']
+        else:
+            norm_val = norm_rows.iloc[0]['close']
+        group['close'] = group['close'] / norm_val
+        group['MA_15'] = group['MA_15'] / norm_val
+        group['MA_25'] = group['MA_25'] / norm_val
+        group['MA_100'] = group['MA_100'] / norm_val
+        return group
+
+    # Normalize each day.
+    df_norm = df.groupby('date', group_keys=False).apply(normalize_group)
+    
+    # Rename columns as specified.
+    df_norm = df_norm.rename(columns={
+        'MA_15': 'SMA_15',
+        'MA_25': 'SMA_25',
+        'MA_100': 'SMA_100',
+        'chosen_slope': 'slope_10'
+    })
+    
+    # Create a new DataFrame with only the desired columns.
+    # (Keep 'date' and 'time' temporarily for groupby operations.)
+    df_proc = df_norm[['date', 'time', 'close', 'SMA_100', 'SMA_25', 'SMA_15', 'slope_10']].copy()
+    
+    # Define a function to compute run-length features for each day.
+    def compute_run_lengths(group):
+        # Compute sma_25_below_100_run_length.
+        condition = group['SMA_25'] < group['SMA_100']
+        group['sma_25_below_100_run_length'] = condition.groupby((~condition).cumsum()).cumcount() + 1
+        group.loc[~condition, 'sma_25_below_100_run_length'] = 0
+        
+        # Compute negative_slope_run_length.
+        neg_condition = group['slope_10'] < 0
+        group['negative_slope_run_length'] = neg_condition.groupby((~neg_condition).cumsum()).cumcount() + 1
+        group.loc[~neg_condition, 'negative_slope_run_length'] = 0
+        
+        # Compute positive_slope_run_length.
+        pos_condition = group['slope_10'] > 0
+        group['positive_slope_run_length'] = pos_condition.groupby((~pos_condition).cumsum()).cumcount() + 1
+        group.loc[~pos_condition, 'positive_slope_run_length'] = 0
+        
+        return group
+
+    # print(df_proc)
+    # exit()
+    df_features = df_proc.groupby('date', group_keys=False).apply(compute_run_lengths)
+    
+    # Select and order the final columns as required.
+    final_columns = ['close', 'SMA_100', 'SMA_25', 'SMA_15', 'slope_10',
+                     'sma_25_below_100_run_length', 'negative_slope_run_length', 'positive_slope_run_length']
+    result_df = df_features[final_columns].copy()
+    return result_df
 
 ###############################################################################
 #                         5. MASTER ANALYSIS FUNCTION                         #
@@ -872,7 +1254,7 @@ def run_analysis(
 
         # Plot close if requested
         if plot_config.plot_close:
-            plot_close_chart_for_day(selected_df, date_str, plot_config)
+            recent_time = plot_close_chart_for_day(selected_df, date_str, plot_config)
 
         # Collect stats if desired
         if collect_stats:
@@ -882,13 +1264,13 @@ def run_analysis(
     # Convert stats to DataFrame for further use
     stats_df = pd.DataFrame(all_stats)
     # print(selected_df)
-    return ret_df
+    return ret_df, recent_time
 
 
 ###############################################################################
 # Core loop that runs every minute
 ###############################################################################
-def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = None):
+def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = None):
     """
     Example function that (1) fetches or analyzes data every minute,
     (2) triggers on_interval_elapsed() every 'minutes_interval' minutes,
@@ -902,6 +1284,7 @@ def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = Non
     iteration_count = 0
     known_minima = set()  # Keep track of local-min indices found so far
     current_minima = 0
+    last_recent_time = None
     while True:
         iteration_count += 1
 
@@ -923,14 +1306,25 @@ def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = Non
         tomorrow = today + datetime.timedelta(days=1)
         formatted_tomorrow = tomorrow.strftime("%Y-%m-%d")
 
-        df = run_analysis(
-            symbol="SPY",
-            start_date=formatted_today,
-            end_date=formatted_tomorrow,
-            plot_config=config,
-            collect_stats=True,
-            use_yahoo = True
-        )
+        threshold_time = datetime.time(15, 0)
+        now_time = datetime.datetime.now().time()
+        if now_time > threshold_time:
+            exit()
+
+        print(f"=========== [{now_time.strftime("%H:%M:%S")}] Fetching Stock Data ===========")
+        try:
+            df, recent_time = run_analysis(
+                symbol="SPY",
+                start_date=formatted_today,
+                end_date=formatted_tomorrow,
+                plot_config=config,
+                collect_stats=True,
+                use_yahoo = False
+            )
+        except:
+            time.sleep(60)
+            continue
+
         if df is None:
             time.sleep(60)
             continue
@@ -980,6 +1374,11 @@ def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = Non
         if (len(local_min_indices) > 0) and (current_minima != current_time):
             on_new_local_minimum_found(current_idx, df["close"].iloc[current_idx], df)
             current_minima = current_time
+        elif recent_time != last_recent_time:
+            last_recent_time = recent_time
+            on_new_local_minimum_found(current_idx, df["close"].iloc[current_idx], df)
+        elif iteration_count % minutes_interval == 0:
+            on_interval_elapsed(df)
 
         # # Find newly discovered minima
         # new_minima = current_minima - known_minima
@@ -989,11 +1388,11 @@ def start_monitoring(symbol="SPY", minutes_interval=30, config: PlotConfig = Non
         #     # Update our global record of known minima
         #     known_minima.update(new_minima)
 
-        # ----------------------------------------------------
-        # 3) Trigger event if we've hit the interval
-        # ----------------------------------------------------
-        if iteration_count % minutes_interval == 0:
-            on_interval_elapsed(df)
+        # # ----------------------------------------------------
+        # # 3) Trigger event if we've hit the interval
+        # # ----------------------------------------------------
+        # if iteration_count % minutes_interval == 0:
+        #     on_interval_elapsed(df)
 
         # ----------------------------------------------------
         # 4) Sleep until next minute
@@ -1011,6 +1410,15 @@ if __name__ == "__main__":
     script_path = os.path.abspath(__file__)
     script_dir = os.path.dirname(script_path)
     os.chdir(script_dir)
+    
+    model_path = "other_analysis/random_forest_model.pkl"
+    with open(model_path, 'rb') as f:
+        rf_classifier = pickle.load(f)
+    # new_sample = np.array([[1.0, 0.95, 0.97, 0.98, -0.02, 3, 0, 1]])
+
+    # prediction = rf_classifier.predict(new_sample)
+    # print("Prediction for new sample:", prediction)
+    # exit()
 
     # Example usage:
     #   1) Basic config: just close, no volume
@@ -1025,19 +1433,22 @@ if __name__ == "__main__":
         highlight_below_ma_runs=True,
         find_local_minima_in_slope=True,
         save_plots=True,
+        # show_plots=True,
         slope_source='close',
-        slope_lookback=10
+        slope_lookback=10,
+        rand_forest_class = rf_classifier
     )
 
-    start_monitoring(config=config)
-    # df = run_analysis(
-    #     symbol="SPY",
-    #     start_date="2020-01-31",
-    #     end_date="2025-02-01",
-    #     plot_config=config,
-    #     collect_stats=True,
-    #     use_yahoo = False
-    # )
+    # start_monitoring(config=config, minutes_interval=30)
+    df, _ = run_analysis(
+        symbol="SPY",
+        # start_date="2020-01-01",
+        start_date="2025-02-01",
+        end_date="2025-02-14",
+        plot_config=config,
+        collect_stats=True,
+        use_yahoo = False
+    )
 
     # # stats now holds a DataFrame with columns like ["date", "daily_min_slope"]
     # print(stats)

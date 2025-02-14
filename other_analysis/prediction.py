@@ -5,11 +5,13 @@ import pickle
 
 import matplotlib.pyplot as plt
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             mean_absolute_error, mean_squared_error, r2_score)
 
 # Global threshold constant for classification.
-RATIO_THRESHOLD = 1.001
+RATIO_THRESHOLD = 1.0013
+EVAL_RATIO = 1.0000
 
 
 def load_and_normalize_data(file_path, norm_time):
@@ -102,7 +104,7 @@ def train_random_forest(train_df, random_state=42):
       - 'close'
       - All columns starting with 'SMA_'
       - All columns starting with 'slope_'
-      - 'downward_trend'
+      - 'downward_trend' (if available)
       - Additional run-length features if available.
 
     The target is set to 1 if 'future_ratio' > RATIO_THRESHOLD, else 0.
@@ -139,6 +141,52 @@ def train_random_forest(train_df, random_state=42):
 
     return clf
 
+
+def train_random_forest_regressor(train_df, random_state=42):
+    """
+    Trains a RandomForest regressor on the training DataFrame.
+
+    Features used:
+      - 'close'
+      - All columns starting with 'SMA_'
+      - All columns starting with 'slope_'
+      - 'downward_trend' (if available)
+      - Additional run-length features if available.
+
+    The target is the 'minutes_to_max_close' column.
+
+    Parameters:
+        train_df (pd.DataFrame): Training DataFrame.
+        random_state (int): Random state for reproducibility.
+
+    Returns:
+        RandomForestRegressor: Trained regressor.
+    """
+    train_df = train_df.sample(frac=1, random_state=random_state).reset_index(drop=True).copy()
+
+    features = ['close']
+    features += [col for col in train_df.columns if col.startswith('SMA_')]
+    features += [col for col in train_df.columns if col.startswith('slope_')]
+
+    if 'downward_trend' in train_df.columns:
+        features.append('downward_trend')
+    if 'sma_25_below_100_run_length' in train_df.columns:
+        features.append('sma_25_below_100_run_length')
+    if 'negative_slope_run_length' in train_df.columns:
+        features.append('negative_slope_run_length')
+    if 'positive_slope_run_length' in train_df.columns:
+        features.append('positive_slope_run_length')
+
+    # Drop rows with missing target values
+    train_df = train_df.dropna(subset=['minutes_to_max_close'])
+
+    X_train = train_df[features]
+    y_train = train_df['minutes_to_max_close']
+
+    reg = RandomForestRegressor(random_state=random_state, n_estimators=100, min_samples_split=2, verbose=1)
+    reg.fit(X_train, y_train)
+
+    return reg
 
 def add_slope_run_length(df, slope_column='slope_10'):
     """
@@ -189,7 +237,6 @@ def add_sma_run_length(df, sma25_col='SMA_25', sma100_col='SMA_100', new_col='sm
     df_with_run = df.groupby('date', group_keys=False).apply(compute_run_length)
     return df_with_run
 
-
 def evaluate_model(clf, df):
     """
     Evaluates the classifier using the provided DataFrame and prints performance metrics.
@@ -217,39 +264,49 @@ def evaluate_model(clf, df):
     y_true = df['target']
     y_pred = clf.predict(X)
 
-    print("Accuracy:", accuracy_score(y_true, y_pred))
+    print("Classification Accuracy:", accuracy_score(y_true, y_pred))
     print("\nClassification Report:\n", classification_report(y_true, y_pred))
     print("Confusion Matrix:\n", confusion_matrix(y_true, y_pred))
 
 
-def display_feature_importances(clf, features):
+def evaluate_regression_model(reg, df):
     """
-    Displays and plots the feature importances of the trained classifier.
+    Evaluates the regressor using the provided DataFrame and prints regression metrics.
 
     Parameters:
-        clf: Trained classifier.
-        features (list): List of feature names.
+        reg: Trained regressor.
+        df (pd.DataFrame): DataFrame for evaluation.
     """
-    importances = clf.feature_importances_
-    df_importances = pd.DataFrame({'Feature': features, 'Importance': importances})
-    df_importances.sort_values(by='Importance', ascending=False, inplace=True)
+    features = ['close']
+    features += [col for col in df.columns if col.startswith('SMA_')]
+    features += [col for col in df.columns if col.startswith('slope_')]
+    if 'downward_trend' in df.columns:
+        features.append('downward_trend')
+    if 'sma_25_below_100_run_length' in df.columns:
+        features.append('sma_25_below_100_run_length')
+    if 'negative_slope_run_length' in df.columns:
+        features.append('negative_slope_run_length')
+    if 'positive_slope_run_length' in df.columns:
+        features.append('positive_slope_run_length')
 
-    print("Feature Importances:")
-    print(df_importances)
+    df = df.copy()
+    df = df.dropna(subset=['minutes_to_max_close'])
+    X = df[features]
+    y_true = df['minutes_to_max_close']
+    y_pred = reg.predict(X)
 
-    plt.figure(figsize=(10, 6))
-    plt.bar(df_importances['Feature'], df_importances['Importance'])
-    plt.xticks(rotation=45, ha='right')
-    plt.xlabel("Feature")
-    plt.ylabel("Importance")
-    plt.title("Feature Importances from the Random Forest Model")
-    plt.tight_layout()
-    plt.show()
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    print("Regression Metrics:")
+    print(f"Mean Absolute Error: {mae:.3f}")
+    print(f"Mean Squared Error: {mse:.3f}")
+    print(f"R2 Score: {r2:.3f}")
 
 
 def evaluate_day_predictions(clf, df, day):
     """
-    Evaluates predictions for a given day by plotting the normalized close values,
+    Evaluates classification predictions for a given day by plotting the normalized close values
     and comparing predicted vs. actual classifications.
 
     Parameters:
@@ -278,7 +335,7 @@ def evaluate_day_predictions(clf, df, day):
 
     X_day = day_df[features]
     predictions = clf.predict(X_day)
-    actual = (day_df['future_ratio'] > 1).astype(int)
+    actual = (day_df['future_ratio'] > EVAL_RATIO).astype(int)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(12, 8))
 
@@ -287,7 +344,7 @@ def evaluate_day_predictions(clf, df, day):
     ax1.set_ylabel("Normalized Close")
     ax1.legend()
 
-    # Identify contiguous runs of predictions equal to 1.
+    # Shade regions with contiguous predictions of 1 (at least 3 in a row)
     runs = []
     n = len(predictions)
     i = 0
@@ -316,14 +373,85 @@ def evaluate_day_predictions(clf, df, day):
     plt.show()
 
 
-def main(retrain=False, model_path="random_forest_model.pkl", save_trees_path=None):
+def evaluate_day_regression(reg, df, day):
     """
-    Main function to load data, process features, train or load a model, and evaluate performance.
+    Evaluates regression predictions for a given day by plotting the actual vs. predicted
+    'minutes_to_max_close' values.
 
     Parameters:
-        retrain (bool): If True, retrain the model. Otherwise, load the model if it exists.
+        reg: Trained regressor.
+        df (pd.DataFrame): Complete DataFrame with features.
+        day (str): Day in 'YYYY-MM-DD' format.
+    """
+    day_df = df[df['date'] == day].copy()
+    if day_df.empty:
+        print(f"No data available for day: {day}")
+        return
+
+    day_df.sort_values(by='epoch_time', inplace=True)
+
+    features = ['close']
+    features += [col for col in day_df.columns if col.startswith('SMA_')]
+    features += [col for col in day_df.columns if col.startswith('slope_')]
+    if 'downward_trend' in day_df.columns:
+        features.append('downward_trend')
+    if 'sma_25_below_100_run_length' in day_df.columns:
+        features.append('sma_25_below_100_run_length')
+    if 'negative_slope_run_length' in day_df.columns:
+        features.append('negative_slope_run_length')
+    if 'positive_slope_run_length' in day_df.columns:
+        features.append('positive_slope_run_length')
+
+    X_day = day_df[features]
+    predictions = reg.predict(X_day)
+    actual = day_df['minutes_to_max_close']
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(day_df.index, actual, label="Actual minutes_to_max_close", color='blue', marker='o')
+    plt.plot(day_df.index, predictions, label="Predicted minutes_to_max_close", color='red', marker='x', linestyle='--')
+    plt.xlabel("Data Index")
+    plt.ylabel("Minutes to Max Close")
+    plt.title(f"Regression: Actual vs Predicted minutes_to_max_close on {day}")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def display_feature_importances(model, features):
+    """
+    Displays and plots the feature importances of the trained model.
+
+    Parameters:
+        model: Trained model (classifier or regressor).
+        features (list): List of feature names.
+    """
+    importances = model.feature_importances_
+    df_importances = pd.DataFrame({'Feature': features, 'Importance': importances})
+    df_importances.sort_values(by='Importance', ascending=False, inplace=True)
+
+    print("Feature Importances:")
+    print(df_importances)
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(df_importances['Feature'], df_importances['Importance'])
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel("Feature")
+    plt.ylabel("Importance")
+    plt.title("Feature Importances")
+    plt.tight_layout()
+    plt.show()
+
+
+def main(model_type="classifier", retrain=False, model_path="random_forest_model.pkl", save_trees_path=None):
+    """
+    Main function to load data, process features, train or load a model (classifier or regressor),
+    and evaluate its performance.
+
+    Parameters:
+        model_type (str): "classifier" or "regressor".
+        retrain (bool): If True, retrain the model; otherwise, load the model if it exists.
         model_path (str): Path to the model file.
-        save_trees_path (str or None): If provided, the file path to save decision trees in a human-readable format.
+        save_trees_path (str or None): If provided, path to save decision trees in a human-readable format.
     """
     file_path = "dataset_w_features.csv"
     norm_time = "08:30"
@@ -350,17 +478,29 @@ def main(retrain=False, model_path="random_forest_model.pkl", save_trees_path=No
     train_df, val_df, test_df = split_dataset(df_with_sma_run, train_frac=0.7, val_frac=0.15, test_frac=0.15, random_state=42)
     print(f"Train set: {len(train_df)} rows, Validation set: {len(val_df)} rows, Test set: {len(test_df)} rows.\n")
 
-    # Either load the model or train a new one.
-    if not retrain and os.path.exists(model_path):
-        print(f"Loading model from {model_path}...")
-        with open(model_path, "rb") as f:
-            clf = pickle.load(f)
-    else:
-        print("Training new Random Forest classifier...")
-        clf = train_random_forest(train_df, random_state=42)
-        with open(model_path, "wb") as f:
-            pickle.dump(clf, f)
-        print(f"Model saved to {model_path}.")
+    # Load or train the model based on model_type.
+    if model_type == "classifier":
+        if not retrain and os.path.exists(model_path):
+            print(f"Loading classifier from {model_path}...")
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
+        else:
+            print("Training new Random Forest classifier...")
+            model = train_random_forest(train_df, random_state=42)
+            with open(model_path, "wb") as f:
+                pickle.dump(model, f)
+            print(f"Classifier saved to {model_path}.")
+    else:  # model_type == "regressor"
+        if not retrain and os.path.exists(model_path):
+            print(f"Loading regressor from {model_path}...")
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
+        else:
+            print("Training new Random Forest regressor...")
+            model = train_random_forest_regressor(train_df, random_state=42)
+            with open(model_path, "wb") as f:
+                pickle.dump(model, f)
+            print(f"Regressor saved to {model_path}.")
 
     # If requested, export the decision trees in a human-readable format.
     if save_trees_path:
@@ -381,17 +521,23 @@ def main(retrain=False, model_path="random_forest_model.pkl", save_trees_path=No
 
         print(f"Exporting decision trees to {save_trees_path} in a human-readable format...")
         with open(save_trees_path, "w") as f:
-            for i, tree in enumerate(clf.estimators_):
+            for i, tree in enumerate(model.estimators_):
                 f.write(f"Decision Tree {i}\n")
                 tree_text = export_text(tree, feature_names=feature_list)
                 f.write(tree_text)
                 f.write("\n" + "=" * 80 + "\n")
 
-    print("Evaluating model on Validation Set:")
-    evaluate_model(clf, val_df)
-
-    # Evaluate predictions on a specific day (example day: 2025-02-07)
-    evaluate_day_predictions(clf, df_with_sma_run, '2025-02-07')
+    # Evaluate the model.
+    if model_type == "classifier":
+        print("Evaluating classifier on Validation Set:")
+        evaluate_model(model, val_df)
+        # Example evaluation for a specific day.
+        evaluate_day_predictions(model, df_with_sma_run, '2025-02-10')
+    else:
+        print("Evaluating regressor on Validation Set:")
+        evaluate_regression_model(model, val_df)
+        # Example evaluation for a specific day.
+        evaluate_day_regression(model, df_with_sma_run, '2025-02-12')
 
     # Prepare feature list for displaying feature importances.
     features = ['close']
@@ -406,14 +552,16 @@ def main(retrain=False, model_path="random_forest_model.pkl", save_trees_path=No
     if 'positive_slope_run_length' in train_df.columns:
         features.append('positive_slope_run_length')
 
-    display_feature_importances(clf, features)
+    # display_feature_importances(model, features)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Random Forest prediction script for SPY data.")
     parser.add_argument("--retrain", action="store_true", help="Retrain the model instead of loading from file.")
     parser.add_argument("--model-path", type=str, default="random_forest_model.pkl", help="Path to save/load the model.")
-    parser.add_argument("--save-trees", type=str, default="trees.txt", help="Path to save the decision trees in a human-readable format.")
+    parser.add_argument("--save-trees", type=str, default=None, help="Path to save the decision trees in a human-readable format.")
+    parser.add_argument("--model-type", type=str, choices=["classifier", "regressor"], default="classifier",
+                        help="Type of model to train: 'classifier' (default) or 'regressor'.")
     args = parser.parse_args()
 
-    main(retrain=args.retrain, model_path=args.model_path, save_trees_path=args.save_trees)
+    main(model_type=args.model_type, retrain=args.retrain, model_path=args.model_path, save_trees_path=args.save_trees)

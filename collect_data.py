@@ -89,7 +89,7 @@ def store_stock_data(data, symbol, repo_root):
 def main():
     api_key = os.environ.get('API_KEY')
     symbol = 'SPY'
-    start_date = '2025-01-26'
+    start_date = '2025-02-01'
     today = datetime.date.today()
     end_date = today.strftime("%Y-%m-%d")
     # end_date = '2025-01-28'

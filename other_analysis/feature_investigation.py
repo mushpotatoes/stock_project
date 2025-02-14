@@ -600,7 +600,7 @@ class SPYDataLoader:
             raise ValueError("Data not loaded. Please call load_data() first.")
         
         # Define the base columns we always want to include.
-        base_cols = ['date', 'time', 'epoch_time', 'close']
+        base_cols = ['date', 'time', 'epoch_time', 'close', "volume"]
         
         # Find moving average and slope columns.
         sma_cols = [col for col in self.dataframe.columns if col.startswith('SMA_')]
@@ -655,7 +655,7 @@ if __name__ == "__main__":
     
     # Plot a specific day's data.
     # Replace '2020-01-02' with a date present in your database.
-    day_to_plot = '2025-02-06'
+    day_to_plot = '2025-02-12'
     # To display the plot:
     # loader.plot_day(day_to_plot,start_time="8:30", end_time="15:00")
     loader.plot_day_with_extrema(day_to_plot, price_column='close',
