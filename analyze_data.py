@@ -20,6 +20,9 @@ import warnings
 
 import pytz
 import requests
+from sklearn.preprocessing import StandardScaler
+import joblib
+import concurrent.futures
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -207,6 +210,7 @@ def get_recent_purple_start_in_green(day_df_plot, predicted_classes):
     If no such purple section is found, returns None.
     """
     # --- Identify Purple Runs ---
+    min_len = 3
     purple_runs = []
     n = len(predicted_classes)
     i = 0
@@ -216,7 +220,7 @@ def get_recent_purple_start_in_green(day_df_plot, predicted_classes):
             while i < n and predicted_classes[i] == 1:
                 i += 1
             end = i - 1
-            if (end - start + 1) >= 3:
+            if (end - start + 1) >= min_len:
                 purple_runs.append((start, end))
         else:
             i += 1
@@ -296,11 +300,11 @@ def get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes
             end = i - 1
             
             # Retrieve start and end timestamps.
-            start_time = day_df_plot.iloc[start]['time']
-            end_time = day_df_plot.iloc[end]['time']
+            start_time = day_df_plot.iloc[start]['datetime']
+            end_time = day_df_plot.iloc[end]['datetime']
             
-            # Check if the run lasts longer than 5 minutes.
-            if end_time - start_time > pd.Timedelta(minutes=5):
+            # Check if the run lasts longer than some number of minutes.
+            if end_time - start_time > pd.Timedelta(minutes=3):
                 purple_runs.append((start, end))
         else:
             i += 1
@@ -309,7 +313,7 @@ def get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes
         return None
 
     # --- Retrieve the Start Times of the Qualified Purple Runs ---
-    purple_start_times = [day_df_plot.iloc[start]['time'] for start, _ in purple_runs]
+    purple_start_times = [day_df_plot.iloc[start]['datetime'] for start, _ in purple_runs]
     
     # --- Return the Most Recent (Latest) Start Time ---
     most_recent_timestamp = max(purple_start_times)
@@ -320,110 +324,19 @@ def get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes
 ###############################################################################
 central = pytz.timezone('US/Central')
 
-# def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None, end_date=None):
-#     """
-#     Load stock data either from a local SQLite DB (default) or from Yahoo Finance
-#     if use_yahoo=True.  For Yahoo Finance, you can optionally provide date range
-#     strings (YYYY-MM-DD) for start_date/end_date.
-#     Returns a DataFrame with at least:
-#        ['epoch_time', 'open', 'high', 'low', 'close', 'volume', 'time']
-#     sorted by 'epoch_time'.
-#     """
-
-#     if use_yahoo:
-#         import yfinance as yf
-#         import datetime
-
-#         # If no date range is given, pick something reasonable
-#         if start_date is None:
-#             start_date = "2020-01-01"
-#         if end_date is None:
-#             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
-
-#         # Download daily data (use interval="1m" if you actually need intraday 
-#         # data and have yfinance privileges to do so)
-#         try:
-#             data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
-#         except:
-#             print("Failed to download data")
-#             return None
-
-#         if data.empty:
-#             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
-#             return pd.DataFrame()
-
-#         # Reset index so 'Date' becomes a regular column
-#         data.reset_index(inplace=True)
-
-#         # Rename columns to align with existing usage
-#         data.rename(
-#             columns={
-#                 'Datetime': 'date',
-#                 'Open': 'open',
-#                 'High': 'high',
-#                 'Low': 'low',
-#                 'Close': 'close',
-#                 'Adj Close': 'adj_close',  # in case you want it
-#                 'Volume': 'volume'
-#             },
-#             inplace=True
-#         )
-#         # print(data)
-#         # exit()
-
-#         # Convert date to epoch_time
-#         data['date'] = data['date'] - pd.Timedelta(hours=1)
-#         data['epoch_time'] = data['date'].apply(lambda dt: dt.timestamp())
-
-#         # Generate a 'time' column if downstream code expects it:
-#         # (for daily data, just use "00:00:00" or format the date if you like)
-#         data['time'] = data['date'].dt.strftime("%H:%M:%S")
-#         data['close'] = data['close'].round(2)
-
-
-#         # Sort and re-index
-#         data.sort_values(by='epoch_time', inplace=True)
-#         data.reset_index(drop=True, inplace=True)
-#         return data
-
-#     else:
-#         # Original LOCAL-SQLITE logic:
-#         import sqlite3
-#         import os
-
-#         db_path = os.path.join(repo_root, f"{symbol}_data.db")
-#         conn = sqlite3.connect(db_path)
-#         cursor = conn.cursor()
-
-#         # Get all table names in the SQLite database
-#         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-#         table_names = [row[0] for row in cursor.fetchall()]
-
-#         # Load each table into a list of DataFrames
-#         df_list = []
-#         for table_name in table_names:
-#             query = f"SELECT * FROM {table_name}"
-#             df_list.append(pd.read_sql_query(query, conn))
-
-#         conn.close()
-
-#         # Concatenate all DataFrames and sort by 'epoch_time'
-#         df = pd.concat(df_list, ignore_index=True)
-#         df.sort_values(by='epoch_time', inplace=True)
-#         df.reset_index(drop=True, inplace=True)
-#         return df
-
 def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None, end_date=None):
     """
-    Load stock data either from Yahoo Finance (if use_yahoo=True) or from the Polygon API by default.
-    For Yahoo Finance, you can optionally provide date range strings (YYYY-MM-DD) for start_date/end_date.
-    
+    Load stock data either from a local SQLite DB (default) or from Yahoo Finance
+    if use_yahoo=True.  For Yahoo Finance, you can optionally provide date range
+    strings (YYYY-MM-DD) for start_date/end_date.
     Returns a DataFrame with at least:
        ['epoch_time', 'open', 'high', 'low', 'close', 'volume', 'time']
     sorted by 'epoch_time'.
     """
+
     if use_yahoo:
         import yfinance as yf
+        import datetime
 
         # If no date range is given, pick something reasonable
         if start_date is None:
@@ -431,18 +344,22 @@ def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None
         if end_date is None:
             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
 
-        # Download daily data (use interval="1m" if you need intraday data)
+        # Download daily data (use interval="1m" if you actually need intraday 
+        # data and have yfinance privileges to do so)
         try:
             data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
-        except Exception as e:
-            print("Failed to download data from Yahoo Finance:", e)
+        except:
+            print("Failed to download data")
             return None
 
         if data.empty:
             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
             return pd.DataFrame()
 
+        # Reset index so 'Date' becomes a regular column
         data.reset_index(inplace=True)
+
+        # Rename columns to align with existing usage
         data.rename(
             columns={
                 'Datetime': 'date',
@@ -450,83 +367,170 @@ def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None
                 'High': 'high',
                 'Low': 'low',
                 'Close': 'close',
-                'Adj Close': 'adj_close',  # optional
+                'Adj Close': 'adj_close',  # in case you want it
                 'Volume': 'volume'
             },
             inplace=True
         )
-        # Adjust time, convert to epoch, and create a 'time' column.
+        # print(data)
+        # exit()
+
+        # Convert date to epoch_time
         data['date'] = data['date'] - pd.Timedelta(hours=1)
         data['epoch_time'] = data['date'].apply(lambda dt: dt.timestamp())
+
+        # Generate a 'time' column if downstream code expects it:
+        # (for daily data, just use "00:00:00" or format the date if you like)
         data['time'] = data['date'].dt.strftime("%H:%M:%S")
         data['close'] = data['close'].round(2)
+
+
+        # Sort and re-index
         data.sort_values(by='epoch_time', inplace=True)
         data.reset_index(drop=True, inplace=True)
         return data
 
     else:
-        # --- POLYGON API BRANCH ---
-        # Use Polygon API by default rather than local SQLite.
-        # If no date range is provided, use defaults.
-        if start_date is None:
-            start_date = "2020-01-01"
-        if end_date is None:
-            end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+        # Original LOCAL-SQLITE logic:
+        import sqlite3
+        import os
+
+        db_path = os.path.join(repo_root, f"{symbol}_data.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Get all table names in the SQLite database
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        table_names = [row[0] for row in cursor.fetchall()]
+
+        # Load each table into a list of DataFrames
+        df_list = []
+        for table_name in table_names:
+            query = f"SELECT * FROM {table_name}"
+            df_list.append(pd.read_sql_query(query, conn))
+
+        conn.close()
+
+        # Concatenate all DataFrames and sort by 'epoch_time'
+        df = pd.concat(df_list, ignore_index=True)
+        df.sort_values(by='epoch_time', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+# def load_and_sort_stock_data(symbol, repo_root, use_yahoo=False, start_date=None, end_date=None):
+#     """
+#     Load stock data either from Yahoo Finance (if use_yahoo=True) or from the Polygon API by default.
+#     For Yahoo Finance, you can optionally provide date range strings (YYYY-MM-DD) for start_date/end_date.
+    
+#     Returns a DataFrame with at least:
+#        ['epoch_time', 'open', 'high', 'low', 'close', 'volume', 'time']
+#     sorted by 'epoch_time'.
+#     """
+#     if use_yahoo:
+#         import yfinance as yf
+
+#         # If no date range is given, pick something reasonable
+#         if start_date is None:
+#             start_date = "2020-01-01"
+#         if end_date is None:
+#             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+
+#         # Download daily data (use interval="1m" if you need intraday data)
+#         try:
+#             data = yf.download(symbol, start=start_date, end=end_date, interval="1m", prepost=True)
+#         except Exception as e:
+#             print("Failed to download data from Yahoo Finance:", e)
+#             return None
+
+#         if data.empty:
+#             print(f"No Yahoo Finance data retrieved for {symbol} from {start_date} to {end_date}.")
+#             return pd.DataFrame()
+
+#         data.reset_index(inplace=True)
+#         data.rename(
+#             columns={
+#                 'Datetime': 'date',
+#                 'Open': 'open',
+#                 'High': 'high',
+#                 'Low': 'low',
+#                 'Close': 'close',
+#                 'Adj Close': 'adj_close',  # optional
+#                 'Volume': 'volume'
+#             },
+#             inplace=True
+#         )
+#         # Adjust time, convert to epoch, and create a 'time' column.
+#         data['date'] = data['date'] - pd.Timedelta(hours=1)
+#         data['epoch_time'] = data['date'].apply(lambda dt: dt.timestamp())
+#         data['time'] = data['date'].dt.strftime("%H:%M:%S")
+#         data['close'] = data['close'].round(2)
+#         data.sort_values(by='epoch_time', inplace=True)
+#         data.reset_index(drop=True, inplace=True)
+#         return data
+
+#     else:
+#         # --- POLYGON API BRANCH ---
+#         # Use Polygon API by default rather than local SQLite.
+#         # If no date range is provided, use defaults.
+#         if start_date is None:
+#             start_date = "2020-01-01"
+#         if end_date is None:
+#             end_date = datetime.datetime.today().strftime('%Y-%m-%d')
             
-        api_key = os.environ.get('API_KEY')
-        if not api_key:
-            print("Polygon API key not found in environment variable 'API_KEY'.")
-            return pd.DataFrame()
+#         api_key = os.environ.get('API_KEY')
+#         if not api_key:
+#             print("Polygon API key not found in environment variable 'API_KEY'.")
+#             return pd.DataFrame()
 
-        limit = 5000  # or adjust as needed
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_date}/{end_date}"
-        url += f"?adjusted=false&sort=asc&limit={limit}&apiKey={api_key}"
+#         limit = 5000  # or adjust as needed
+#         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_date}/{end_date}"
+#         url += f"?adjusted=false&sort=asc&limit={limit}&apiKey={api_key}"
         
-        response = requests.get(url)
-        response_json = response.json()
+#         response = requests.get(url)
+#         response_json = response.json()
         
-        if response.status_code == 200 and "results" in response_json:
-            results = response_json["results"]
-        else:
-            print(f"No Polygon data retrieved for {symbol} from {start_date} to {end_date}.")
-            return pd.DataFrame()
+#         if response.status_code == 200 and "results" in response_json:
+#             results = response_json["results"]
+#         else:
+#             print(f"No Polygon data retrieved for {symbol} from {start_date} to {end_date}.")
+#             return pd.DataFrame()
         
-        # Convert results (a list of dictionaries) into a DataFrame.
-        data = pd.DataFrame(results)
-        # Polygon's field definitions:
-        #   t: timestamp (in milliseconds)
-        #   o: open, h: high, l: low, c: close, v: volume, n: number of trades.
-        new_data = pd.DataFrame({
-            'epoch_time': [item['t'] / 1000.0 for item in results],  # Convert ms to seconds
-            # 'date': [pd.to_datetime(item['t'], unit='ms') for item in results],
-            'date': [pd.to_datetime(item['t'], unit='ms', utc=True)
-                    .tz_convert(central).strftime("%Y-%m-%d") for item in results],
-            'time': [pd.to_datetime(item['t'], unit='ms', utc=True)
-                    .tz_convert(central).strftime("%H:%M:%S") for item in results],
-            # 'date': [pd.to_datetime(item['t'], unit='ms').strftime("%Y-%m-%d") for item in results],
-            # 'time': [pd.to_datetime(item['t'], unit='ms').strftime("%H:%M:%S") for item in results],
-            'open':  [item['o'] for item in results],
-            'high':  [item['h'] for item in results],
-            'low':   [item['l'] for item in results],
-            'close': [round(item['c'], 2) for item in results],
-            'volume':[item['v'] for item in results]
-        })
+#         # Convert results (a list of dictionaries) into a DataFrame.
+#         data = pd.DataFrame(results)
+#         # Polygon's field definitions:
+#         #   t: timestamp (in milliseconds)
+#         #   o: open, h: high, l: low, c: close, v: volume, n: number of trades.
+#         new_data = pd.DataFrame({
+#             'epoch_time': [item['t'] / 1000.0 for item in results],  # Convert ms to seconds
+#             # 'date': [pd.to_datetime(item['t'], unit='ms') for item in results],
+#             'date': [pd.to_datetime(item['t'], unit='ms', utc=True)
+#                     .tz_convert(central).strftime("%Y-%m-%d") for item in results],
+#             'time': [pd.to_datetime(item['t'], unit='ms', utc=True)
+#                     .tz_convert(central).strftime("%H:%M:%S") for item in results],
+#             # 'date': [pd.to_datetime(item['t'], unit='ms').strftime("%Y-%m-%d") for item in results],
+#             # 'time': [pd.to_datetime(item['t'], unit='ms').strftime("%H:%M:%S") for item in results],
+#             'open':  [item['o'] for item in results],
+#             'high':  [item['h'] for item in results],
+#             'low':   [item['l'] for item in results],
+#             'close': [round(item['c'], 2) for item in results],
+#             'volume':[item['v'] for item in results]
+#         })
 
-        # data['epoch_time'] = data['t'] / 1000.0   # Convert ms to seconds.
-        # data['open']  = data['o']
-        # data['high']  = data['h']
-        # data['low']   = data['l']
-        # data['close'] = data['c'].round(2)
-        # data['volume'] = data['v']
-        # Create a 'time' column based on the epoch_time.
-        # new_data['time'] = pd.to_datetime(new_data['epoch_time'], unit='s').dt.strftime("%H:%M:%S")
+#         # data['epoch_time'] = data['t'] / 1000.0   # Convert ms to seconds.
+#         # data['open']  = data['o']
+#         # data['high']  = data['h']
+#         # data['low']   = data['l']
+#         # data['close'] = data['c'].round(2)
+#         # data['volume'] = data['v']
+#         # Create a 'time' column based on the epoch_time.
+#         # new_data['time'] = pd.to_datetime(new_data['epoch_time'], unit='s').dt.strftime("%H:%M:%S")
         
-        new_data.sort_values(by='epoch_time', inplace=True)
-        new_data.reset_index(drop=True, inplace=True)
-        # print(new_data)
-        # print(new_data.columns)
-        # exit()
-        return new_data
+#         new_data.sort_values(by='epoch_time', inplace=True)
+#         new_data.reset_index(drop=True, inplace=True)
+#         # print(new_data)
+#         # print(new_data.columns)
+#         # exit()
+#         return new_data
 
 
 
@@ -662,8 +666,13 @@ class PlotConfig:
         # More advanced features:
         highlight_negative_slope_runs: bool = True,
         highlight_below_ma_runs: bool = True,
+        highlight_buy_predictions : bool = True,
         find_local_minima_in_slope: bool = False,
-        rand_forest_class = None
+        high_buy_overlay_min_width: int = 3,
+        use_neg_pos_models: bool = False,
+        rand_forest_class = None,
+        neg_classifier = None,
+        pos_classifier = None
     ):
         self.show_plots = show_plots
         self.save_plots = save_plots
@@ -682,8 +691,14 @@ class PlotConfig:
         self.slope_lookback = slope_lookback
         self.highlight_negative_slope_runs = highlight_negative_slope_runs
         self.highlight_below_ma_runs = highlight_below_ma_runs
+        self.highlight_buy_predictions = highlight_buy_predictions
         self.find_local_minima_in_slope = find_local_minima_in_slope
+        self.high_buy_overlay_min_width = high_buy_overlay_min_width
+        self.use_neg_pos_models = use_neg_pos_models
         self.rand_forest_class = rand_forest_class
+        self.neg_classifier = neg_classifier
+        self.pos_classifier = pos_classifier
+        
 
 
 def plot_volume_chart_for_day(day_df, date_str, config: PlotConfig):
@@ -738,6 +753,157 @@ def plot_volume_chart_for_day(day_df, date_str, config: PlotConfig):
 
     return crossing_idx
 
+def compute_daily_slopes(group, slope_column, lookback):
+    """
+    For a given day group, compute the rolling slope of a chosen column 
+    using a specified lookback window.
+
+    Parameters:
+        group (pd.DataFrame): A DataFrame representing a single day's data.
+        slope_column (str): The name of the column on which to compute slopes.
+        lookback (int): The window size for the rolling calculation.
+
+    Returns:
+        pd.DataFrame: The input group with an added 'slope_10' column.
+    """
+    # Make sure the group is sorted by time, if applicable.
+    group = group.sort_values(by='time')
+    
+    # Compute the rolling slope using our custom function
+    group[f'slope_{lookback}'] = group[slope_column].rolling(window=lookback).apply(slope_of_best_fit, raw=True)
+    return group
+
+def add_slope_difference(df, slope_lookback=10, group_by_date=True):
+    """
+    For a given DataFrame that already contains a column named 'slope_<slope_lookback>',
+    add a new column 'd2_<slope_lookback>' that represents the difference between the current
+    slope value and the previous slope value.
+    
+    Parameters:
+        df (pd.DataFrame): DataFrame containing the slope column.
+        slope_lookback (int): Lookback value used in the slope column name (e.g. 10 for 'slope_10').
+        group_by_date (bool): If True, compute differences separately for each day (requires a 'date' column).
+    
+    Returns:
+        pd.DataFrame: The DataFrame with an added 'd2_<slope_lookback>' column.
+    """
+    slope_col = f'slope_{slope_lookback}'
+    diff_col = f'd2_{slope_lookback}'
+    
+    if group_by_date and 'date' in df.columns:
+        df[diff_col] = df.groupby('date')[slope_col].diff()
+    else:
+        df[diff_col] = df[slope_col].diff()
+    
+    return df
+
+def compute_slopes_for_timeframe(timeframe, df, use_saved_scaler=True):
+    """
+    Compute slope and difference columns for a given timeframe and standardize them
+    using a previously saved StandardScaler. If no scaler is found, fit a new one and save it.
+    
+    Parameters:
+        timeframe (int): The timeframe in minutes.
+        df (pd.DataFrame): DataFrame containing the time-series data.
+        use_saved_scaler (bool): If True, attempt to load an existing scaler.
+        
+    Returns:
+        pd.DataFrame: DataFrame containing the standardized slope and difference columns.
+    """
+    # print(f"Adding {timeframe} minute slopes (Takes a while)")
+    # Create a local copy to work on
+    df_local = df.copy()
+    # Compute rolling slopes for the chosen timeframe.
+    df_local = df_local.groupby('date', group_keys=False).apply(
+        lambda group: compute_daily_slopes(group, 'close', timeframe)
+    )
+    # Add the difference column (e.g., d2_10 for timeframe=10)
+    df_local = add_slope_difference(df_local, slope_lookback=timeframe)
+    
+    # Select only the new columns computed for this timeframe.
+    new_cols = [f'slope_{timeframe}', f'd2_{timeframe}']
+    new_cols_df = df_local[new_cols].copy()
+    # print(f"Done with {timeframe} minute slopes")
+    
+    # Define the scaler file path.
+    scalers_dir = "C:\\Users\\deade\\OneDrive\\Desktop\\data_science\\stock_project\\other_analysis\\scalers"
+    os.makedirs(scalers_dir, exist_ok=True)
+    scaler_filename = os.path.join(scalers_dir, f"scaler_timeframe_{timeframe}.pkl")
+    
+    # Load an existing scaler if available and if desired.
+    if use_saved_scaler and os.path.exists(scaler_filename):
+        # print(f"Loading existing scaler from {scaler_filename}")
+        scaler = joblib.load(scaler_filename)
+        new_cols_standardized = scaler.transform(new_cols_df)
+        # print(f"[{timeframe}] Mean values:", scaler.mean_)
+        # print(f"[{timeframe}] Scale values:", scaler.scale_)
+        # print(f"[{timeframe}] Variance values:", scaler.var_)
+        # print(f"[{timeframe}] Number of samples:", scaler.n_samples_seen_)
+    else:
+        # Otherwise, fit a new scaler and save it.
+        df = pd.concat([df, new_cols_df], axis=1)
+        return df
+        print(f"No saved scaler found. Fitting a new scaler for timeframe {timeframe}.")
+        scaler = StandardScaler()
+        new_cols_standardized = scaler.fit_transform(new_cols_df)
+        joblib.dump(scaler, scaler_filename)
+        print(f"Scaler for timeframe {timeframe} saved to {scaler_filename}")
+    
+    # Build a DataFrame with the same index as the original data.
+    new_cols_df_standardized = pd.DataFrame(new_cols_standardized, 
+                                            columns=[col for col in new_cols],
+                                            index=new_cols_df.index)
+    
+    return new_cols_df_standardized
+
+def add_slope_run_length(df, slope_column='slope_10'):
+    """
+    Adds run-length columns for negative and positive slope values computed separately for each day.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame.
+        slope_column (str): Name of the slope column for computing run lengths.
+
+    Returns:
+        pd.DataFrame: DataFrame with added run-length columns.
+    """
+    def compute_run_length(group):
+        mask_negative = group[slope_column] < 0
+        group['negative_slope_run_length'] = mask_negative.groupby((~mask_negative).cumsum()).cumcount() + 1
+        group.loc[~mask_negative, 'negative_slope_run_length'] = 0
+
+        mask_positive = group[slope_column] > 0
+        group['positive_slope_run_length'] = mask_positive.groupby((~mask_positive).cumsum()).cumcount() + 1
+        group.loc[~mask_positive, 'positive_slope_run_length'] = 0
+
+        return group
+
+    df_with_runs = df.groupby('date', group_keys=False).apply(compute_run_length)
+    return df_with_runs
+
+
+def add_sma_run_length(df, sma25_col='SMA_25', sma100_col='SMA_100', new_col='sma_25_below_100_run_length'):
+    """
+    Adds a column that counts the run length (in minutes) during which the 25-minute SMA
+    is below the 100-minute SMA, computed separately for each day.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame.
+        sma25_col (str): Column name for the 25-minute SMA.
+        sma100_col (str): Column name for the 100-minute SMA.
+        new_col (str): Name of the new column to store run-length counts.
+
+    Returns:
+        pd.DataFrame: DataFrame with the added run-length column.
+    """
+    def compute_run_length(group):
+        condition = group[sma25_col] < group[sma100_col]
+        group[new_col] = condition.groupby((~condition).cumsum()).cumcount() + 1
+        group.loc[~condition, new_col] = 0
+        return group
+
+    df_with_run = df.groupby('date', group_keys=False).apply(compute_run_length)
+    return df_with_run
 
 def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     """
@@ -745,57 +911,114 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     with optional shading features, local minima, etc.
     """
     # Convert 'time' to a proper datetime so Matplotlib can do time-based plotting
-    day_df['time'] = pd.to_datetime(day_df['time'], format="%H:%M:%S")
+    day_df['time'] = pd.to_datetime(day_df['time'], format="%H:%M:%S").dt.time
+    day_df['date'] = pd.to_datetime(day_df['date'], format='%Y-%m-%d').dt.date
+    day_df['datetime'] = day_df['time'].apply(lambda t: datetime.datetime.combine(day_df['date'].iloc[0], t))
+    # day_df_plot['datetime'] = day_df_plot['time'].apply(lambda t: datetime.datetime.combine(day_df_plot['date'].iloc[0], t))
 
-    # print(f"processing {date_str}")
-    # Compute MAs if requested
-    if config.add_moving_averages and config.ma_windows:
-        for window in config.ma_windows:
-            ma_col = f"MA_{window}"
-            day_df[ma_col] = day_df['close'].rolling(window).mean()
-    # Ensure we have a 25-minute MA if we'll check slopes
-    if 25 not in config.ma_windows:
-        day_df['MA_25'] = day_df['close'].rolling(25).mean()
+    # forest_day_df = prepare_normalized_features(day_df_plot)
+    # print("Normalizing Features")
+    df_with_slopes = prepare_normalized_features(day_df)
+    day_df = compute_slopes_for_timeframe(10, day_df, False)
 
-    # Compute RSI if requested
-    if config.add_rsi:
-        day_df['RSI_14'] = compute_rsi(day_df['close'], period=14)
-    # Decide which series to use for slope
-    slope_series = None
-    if config.slope_source in day_df.columns:
-        # e.g., "MA_25" or "MA_15" or "MA_100" ...
-        slope_series = day_df[config.slope_source]
-    elif config.slope_source.lower() == "close":
-        slope_series = day_df['close']
-    else:
-        # If your code might default or raise an error
-        print(f"Warning: slope_source '{config.slope_source}' not recognized; using 'close' by default.")
-        slope_series = day_df['close']
+    # Get MAs for the plot
+    timeframes = [15, 25, 100]
+    for timeframe in timeframes:
+        day_df[f'MA_{timeframe}'] = day_df.groupby('date')['close'].transform(lambda x: x.rolling(window=timeframe).mean())
+  
+    timeframes = [10, 15, 25, 40, 90, 100, 120]
+    # Use a ProcessPoolExecutor for parallel processing (or ThreadPoolExecutor if more appropriate).
+    # print("Calculating slopes")
 
-    # Compute slope for chosen series, using the specified lookback
-    day_df['chosen_slope'] = slope_series.rolling(config.slope_lookback).apply(
-        slope_of_best_fit, raw=True
+    results = {}
+    for tf in timeframes:
+        try:
+            result_df = compute_slopes_for_timeframe(tf, df_with_slopes)
+            results[tf] = result_df
+        except Exception as exc:
+            print(f"Timeframe {tf} generated an exception: {exc}")
+
+    # Joining the results back into the original DataFrame
+    for tf, new_cols_df in results.items():
+        df_with_slopes = df_with_slopes.join(new_cols_df)
+
+    # with concurrent.futures.ProcessPoolExecutor() as executor:
+    #     # Launch each timeframe computation in parallel
+    #     future_to_tf = {executor.submit(compute_slopes_for_timeframe, tf, df_with_slopes): tf for tf in timeframes}
+        
+    #     # Collect results as they complete
+    #     results = {}
+    #     for future in concurrent.futures.as_completed(future_to_tf):
+    #         tf = future_to_tf[future]
+    #         try:
+    #             result_df = future.result()
+    #             results[tf] = result_df
+    #         except Exception as exc:
+    #             print(f"Timeframe {tf} generated an exception: {exc}")
+    
+    # # Merge all the new columns back into the original DataFrame.
+    # for tf, new_cols_df in results.items():
+    #     df_with_slopes = df_with_slopes.join(new_cols_df)
+    # exit()
+    # print("Adding SMA values")
+    timeframes = [10, 25, 40, 90, 100, 120]
+    for timeframe in timeframes:
+        df_with_slopes[f'SMA_{timeframe}'] = df_with_slopes.groupby('date')['close'].transform(lambda x: x.rolling(window=timeframe).mean())
+    
+    # print("Adding slope run-length features...")
+    df_with_runs = add_slope_run_length(df_with_slopes, slope_column='slope_10')
+    # print(f"Dataframe {len(df_with_runs)} after add_slope_run_length")
+
+    # print("Adding SMA run-length features...")
+    forest_day_df = add_sma_run_length(
+        df_with_runs, sma25_col='SMA_25', sma100_col='SMA_100', new_col='sma_25_below_100_run_length'
     )
 
     # Possibly restrict plotting range
     if config.restrict_830_to_300:
         start_plot_time = pd.to_datetime("08:30:00").time()
         end_plot_time   = pd.to_datetime("15:00:00").time()
-        mask_plot = (day_df['time'].dt.time >= start_plot_time) & (day_df['time'].dt.time <= end_plot_time)
+        mask_plot = (day_df['time'] >= start_plot_time) & (day_df['time'] <= end_plot_time)
         day_df_plot = day_df.loc[mask_plot].copy().reset_index(drop=True)
+        mask_plot = (forest_day_df['time'] >= start_plot_time) & (forest_day_df['time'] <= end_plot_time)
+        forest_day_df = forest_day_df.loc[mask_plot].copy().reset_index(drop=True)
     else:
         day_df_plot = day_df.copy()
 
-    # print(day_df_plot)
+    selected_features = [
+        "close", "SMA_10", "SMA_25", "SMA_40", "SMA_90", "SMA_100", "SMA_120",
+        "slope_10", "slope_15", "slope_25", "slope_40", "slope_90", "slope_100", "slope_120",
+        "d2_10", "d2_15", "d2_25", "d2_40", "d2_90", "d2_100", "d2_120",
+        "sma_25_below_100_run_length", "negative_slope_run_length", "positive_slope_run_length"
+    ]
+    forest_day_df = forest_day_df[selected_features]
+    # print(forest_day_df)
+    # print(forest_day_df.columns)
+    # exit()
+    specific_day = datetime.date(2025, 2, 13)
+
+    # if day_df_plot['datetime'].iloc[0].date() == specific_day:
+    #     for col in forest_day_df.columns:
+    #         print(f"Statistics for column '{col}':")
+    #         # If you want to only process numeric columns:
+    #         if pd.api.types.is_numeric_dtype(forest_day_df[col]):
+    #             print(forest_day_df[col].describe())
+    #         else:
+    #             print("Non-numeric column, skipping statistics.")
+    #         print("=" * 40)
     if not config.show_plots and not config.save_plots:
         return  # We won't do any actual plotting
+    # forest_day_df.to_csv(f"forest_csv_{day_df_plot['date'].iloc[0]}.csv")
     # print(len(day_df_plot))
     # exit()
-    if len(day_df_plot) != 0:
-        forest_day_df = prepare_normalized_features(day_df_plot)
-        predicted_classes = config.rand_forest_class.predict(forest_day_df)
-    else:
-        predicted_classes = []
+
+    # print(predicted_classes)
+    # print(forest_day_df['close'])
+    # print(forest_day_df['SMA_10'])
+    # print(forest_day_df['slope_10'])
+    # print(forest_day_df['d2_10'])
+    # print(forest_day_df.columns)
+    # exit()
 
     # print(forest_day_df)
     # exit()
@@ -806,38 +1029,78 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     fig.suptitle(f"Close + FFT(Slope) + Slope - {date_str}", fontsize=14)
 
     # 1) Top subplot: Close + MAs
-    ax1.plot(day_df_plot['time'], day_df_plot['close'], label='Close', color='blue')
+    ax1.plot(day_df_plot['datetime'], day_df_plot['close'], label='Close', color='blue')
     if config.add_moving_averages and config.ma_windows:
         for window in config.ma_windows:
-            ax1.plot(day_df_plot['time'], day_df_plot[f"MA_{window}"], label=f"MA_{window}")
+            ax1.plot(day_df_plot['datetime'], day_df_plot[f"MA_{window}"], label=f"MA_{window}")
 
     ax1.set_ylabel('Close')
     ax1.legend(loc='upper left')
     ax1.grid(True)
-    # --- Overlay light purple boxes on ax1 for segments where predicted class == 1 for at least 3 consecutive points.
-    runs = []
-    n = len(predicted_classes)
-    i = 0
-    while i < n:
-        if predicted_classes[i] == 1:
-            start = i
-            while i < n and predicted_classes[i] == 1:
-                i += 1
-            end = i - 1
-            if (end - start + 1) >= 3:
-                runs.append((start, end))
-        else:
-            i += 1
-    for start, end in runs:
-        start_time_val = day_df_plot.iloc[start]['time']
-        end_time_val = day_df_plot.iloc[end]['time']
-        # axvspan will overlay a box between these times.
-        ax1.axvspan(start_time_val, end_time_val, facecolor='plum', alpha=0.3, edgecolor='purple', linewidth=2)
-    # --- End of classification overlay.
 
-    # ------------------ 2) MIDDLE SUBPLOT: FFT of 'chosen_slope' ------------------
+    if config.highlight_buy_predictions:
+        if len(day_df_plot) != 0:
+            # Always predict using the random forest classifier.
+            rand_predicted_classes = config.rand_forest_class.predict(forest_day_df)
+        else:
+            rand_predicted_classes = []
+
+        # --- Overlay for rand_forest_class predictions ---
+        rand_runs = []
+        n = len(rand_predicted_classes)
+        i = 0
+        while i < n:
+            if rand_predicted_classes[i] == 1:
+                start = i
+                while i < n and rand_predicted_classes[i] == 1:
+                    i += 1
+                end = i - 1
+                if (end - start + 1) >= config.high_buy_overlay_min_width:
+                    rand_runs.append((start, end))
+            else:
+                i += 1
+
+        # Draw the random forest overlay (using a distinct color, e.g., blue)
+        for start, end in rand_runs:
+            start_time_val = day_df_plot.iloc[start]['datetime']
+            end_time_val = day_df_plot.iloc[end]['datetime']
+            ax1.axvspan(start_time_val, end_time_val,
+                        facecolor='blue', alpha=0.1, edgecolor='navy', linewidth=2)
+
+        # --- Additional overlay using negative/positive classifier if enabled ---
+        if config.use_neg_pos_models and len(day_df_plot) != 0:
+            # Choose classifier based on the mean slope_10 for the day.
+            # (Assuming you might have both neg_classifier and pos_classifier)
+            if day_df_plot['slope_10'].mean() < 0:
+                extra_predicted_classes = config.neg_classifier.predict(forest_day_df)
+            else:
+                extra_predicted_classes = config.pos_classifier.predict(forest_day_df)
+
+            extra_runs = []
+            n_extra = len(extra_predicted_classes)
+            j = 0
+            while j < n_extra:
+                if extra_predicted_classes[j] == 1:
+                    start = j
+                    while j < n_extra and extra_predicted_classes[j] == 1:
+                        j += 1
+                    end = j - 1
+                    if (end - start + 1) >= config.high_buy_overlay_min_width:
+                        extra_runs.append((start, end))
+                else:
+                    j += 1
+
+            # Draw the extra overlay (using a different color, e.g., plum)
+            for start, end in extra_runs:
+                start_time_val = day_df_plot.iloc[start]['datetime']
+                end_time_val = day_df_plot.iloc[end]['datetime']
+                ax1.axvspan(start_time_val, end_time_val,
+                            facecolor='plum', alpha=0.2, edgecolor='purple', linewidth=2)
+        # --- End of classification overlay.
+
+    # ------------------ 2) MIDDLE SUBPLOT: FFT of 'slope_10' ------------------
     # Drop NaNs before FFT
-    slope_data = day_df_plot['chosen_slope'].dropna()
+    slope_data = day_df_plot['slope_10'].dropna()
     N = len(slope_data)
     if N > 1:
         fft_values = np.fft.fft(slope_data)
@@ -897,19 +1160,19 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     #     ax2.grid(True)
 
     # 3) Bottom subplot: chosen slope
-    ax3.plot(day_df_plot['time'], day_df_plot['chosen_slope'], label='Chosen Slope', color='orange')
+    ax3.plot(day_df_plot['datetime'], day_df_plot['slope_10'], label='Chosen Slope', color='orange')
     ax3.set_ylabel('Slope')
     ax3.set_xlabel('Time of Day')
     ax3.grid(True)
     ax3.legend(loc='upper left')
-    average_slope = day_df_plot['chosen_slope'].mean()
+    average_slope = day_df_plot['slope_10'].mean()
     ax3.axhline(y=average_slope, color='red', linestyle='--', label=f'Average Slope: {average_slope:.2f}')  # Customize color and style
 
 
 
     # Highlight runs of negative slope if enabled
     if config.highlight_negative_slope_runs:
-        neg_mask = (day_df_plot['chosen_slope'] < 0)
+        neg_mask = (day_df_plot['slope_10'] < 0)
         start_idx = None
         runs = []
 
@@ -967,21 +1230,22 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         # Just an example: find local minima between 09:00 and 13:30
         start_local = pd.to_datetime("09:00:00").time()
         end_local   = pd.to_datetime("13:30:00").time()
-        mask_local = (day_df['time'].dt.time >= start_local) & (day_df['time'].dt.time <= end_local)
+        mask_local = (day_df['time'] >= start_local) & (day_df['time'] <= end_local)
         df_local = day_df.loc[mask_local].copy().reset_index(drop=True)
-        local_min_indices = find_local_minima(df_local['chosen_slope'], threshold=-0.09)
+        local_min_indices = find_local_minima(df_local['slope_10'], threshold=-0.09)
 
         # for index in local_min_indices:
-        #     print(f"{index}: {day_df['chosen_slope'].iloc[index]}")
+        #     print(f"{index}: {day_df['slope_10'].iloc[index]}")
         # exit()
         for i_min in local_min_indices:
-            t_min = df_local.loc[i_min, 'time']
+            t_min = df_local.loc[i_min, 'datetime']
             for ax in (ax1, ax2, ax3):
                 ax.axvline(x=t_min, color='red', linestyle='--', alpha=0.7)
 
     # Format the x-axis as times
-    ax3.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax3.xaxis.set_major_locator(mdates.MinuteLocator(interval=15))
     ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax3.set_xlim(pd.to_datetime(f"{date_str} 08:30:00"), pd.to_datetime(f"{date_str} 15:00:00"))
     fig.autofmt_xdate()
 
     plt.tight_layout()
@@ -994,7 +1258,11 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         plt.close(fig)
     elif config.show_plots:
         plt.show()
-    recent_time = get_recent_purple_start_longer_than_5_minutes(day_df_plot, predicted_classes)
+
+    if config.highlight_buy_predictions:
+        recent_time = get_recent_purple_start_longer_than_5_minutes(day_df_plot, rand_predicted_classes)
+    else:
+        recent_time = None
     if recent_time:
         print(f"[{date_str}]: Most recent purple section (long run) starts at: {recent_time.strftime('%H:%M')}")
         return recent_time.strftime('%H:%M')
@@ -1040,8 +1308,8 @@ def compute_daily_stats(
         return slope
 
     series_for_slope = day_df[slope_source]
-    day_df['chosen_slope'] = series_for_slope.rolling(slope_lookback).apply(slope_of_best_fit, raw=True)
-    daily_min_slope = day_df['chosen_slope'].min(skipna=True)
+    day_df['slope_10'] = series_for_slope.rolling(slope_lookback).apply(slope_of_best_fit, raw=True)
+    daily_min_slope = day_df['slope_10'].min(skipna=True)
 
     # Simple local minima / maxima detectors
     def find_local_minima(series, threshold=None):
@@ -1064,21 +1332,21 @@ def compute_daily_stats(
         return maxima_indices
 
     # Find local minima below 0.0 slope, for example
-    local_min_indices = find_local_minima(day_df['chosen_slope'], threshold=-0.09)
+    local_min_indices = find_local_minima(day_df['slope_10'], threshold=-0.09)
     
-    maxima_all = find_local_maxima(day_df['chosen_slope'], threshold=0.03)
+    maxima_all = find_local_maxima(day_df['slope_10'], threshold=0.03)
     max_set = set(maxima_all)
 
     time_intervals = []
     for min_idx in local_min_indices:
-        slope_min = day_df['chosen_slope'].iloc[min_idx]
+        slope_min = day_df['slope_10'].iloc[min_idx]
 
         # Find the *first* local max after min_idx
         # whose slope is at least slope_diff_threshold above slope_min
         next_max_idx = None
         for forward_i in range(min_idx + 1, len(day_df) - 1):
             if forward_i in max_set:
-                slope_max = day_df['chosen_slope'].iloc[forward_i]
+                slope_max = day_df['slope_10'].iloc[forward_i]
                 if slope_max - slope_min >= slope_diff_threshold:
                     next_max_idx = forward_i
                     break
@@ -1103,98 +1371,78 @@ def compute_daily_stats(
 
 def prepare_normalized_features(df):
     """
-    Processes an input DataFrame with columns:
-      - 'date'
-      - 'time' (string formatted as '%H:%M:%S')
-      - 'close'
-      - 'MA_15'  (to be renamed to 'SMA_15')
-      - 'MA_25'  (to be renamed to 'SMA_25')
-      - 'MA_100' (to be renamed to 'SMA_100')
-      - 'chosen_slope' (to be renamed to 'slope_10')
+    Normalizes feature columns in the input DataFrame on a per-day basis.
+
+    The input DataFrame should include, at minimum, the following columns:
+      - 'date': A date string in the '%Y-%m-%d' format.
+      - 'time': A time string in the '%H:%M:%S' format.
+      - 'close': The closing price.
+      - Columns starting with 'SMA_': Represent moving averages (e.g., 'SMA_15', 'SMA_25', 'SMA_100').
+      - Optionally, 'high' and 'low' columns: If present, these will also be normalized.
+
+    The function executes these steps:
     
-    The function performs the following steps:
-      1. Converts the 'time' column to datetime.time.
-      2. For each day (grouped by 'date'), finds the close value at 8:30 and uses it to normalize
-         the 'close' and MA columns.
-      3. Renames the columns to 'SMA_15', 'SMA_25', 'SMA_100', and 'slope_10'.
-      4. Computes three run-length features (per day):
-           - sma_25_below_100_run_length: the run length (in rows) for which SMA_25 < SMA_100.
-           - negative_slope_run_length: the run length for which slope_10 < 0.
-           - positive_slope_run_length: the run length for which slope_10 > 0.
-      5. Returns a new DataFrame with columns in the following order:
-         [close, SMA_100, SMA_25, SMA_15, slope_10,
-          sma_25_below_100_run_length, negative_slope_run_length, positive_slope_run_length]
-    
+      1. **Data Conversion**:
+         - Converts 'time' from a string to a `datetime.time` object.
+         - Converts 'date' from a string to a `datetime.date` object.
+      
+      2. **Normalization Setup**:
+         - Establishes a normalization reference time of 08:30.
+         - For each day (grouped by 'date'), identifies the row corresponding to 08:30.
+      
+      3. **Normalization Process**:
+         - Uses the 'close' value at 08:30 as the base value to normalize:
+              - 'close' and any column starting with 'SMA_'.
+              - Additionally, 'high' and 'low' (if these columns exist and aren’t already normalized).
+         - If a day lacks a row at 08:30 or if the base 'close' value is 0, a warning is issued 
+           and that day’s data remains unnormalized.
+      
+      4. **Output**:
+         - Returns a new DataFrame with the normalized values.
+
     Parameters:
-        df (pd.DataFrame): The input DataFrame.
-    
+        df (pd.DataFrame): Input DataFrame containing time series data with the expected columns.
+
     Returns:
-        pd.DataFrame: The processed DataFrame with normalized values and run-length features.
+        pd.DataFrame: DataFrame with normalized feature columns.
     """
     # Ensure the 'time' column is in datetime.time format.
     df = df.copy()
     df['time'] = pd.to_datetime(df['time'], format='%H:%M:%S').dt.time
+    df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d').dt.date
 
     # Define the normalization time.
     norm_time = pd.to_datetime("08:30", format='%H:%M').time()
     
     # Function to normalize a day's data using the close at 8:30.
+    norm_cols = ['close'] + [col for col in df.columns if col.startswith('SMA_')]
     def normalize_group(group):
-        norm_rows = group[group['time'] == norm_time]
-        if norm_rows.empty:
-            # Fallback: if no row at 08:30, use the first row's close.
-            norm_val = group.iloc[0]['close']
-        else:
-            norm_val = norm_rows.iloc[0]['close']
-        group['close'] = group['close'] / norm_val
-        group['MA_15'] = group['MA_15'] / norm_val
-        group['MA_25'] = group['MA_25'] / norm_val
-        group['MA_100'] = group['MA_100'] / norm_val
+        # Identify the row(s) with the normalization time
+        base_rows = group[group['time'] == norm_time]
+        if base_rows.empty:
+            print(f"Warning: No row found at time '{norm_time}' for date {group.name}. Skipping normalization for this day.")
+            return group
+
+        # Get the close value at norm_time to use as the base
+        base_value = base_rows.iloc[0]['close']
+        if base_value == 0:
+            print(f"Warning: Close value at {norm_time} is 0 for date {group.name}. Skipping normalization for this day.")
+            return group
+
+        # Normalize the designated columns in norm_cols
+        group.loc[:, norm_cols] = group.loc[:, norm_cols] / base_value
+
+        # Additionally, normalize 'high' and 'low' if they are present and not already in norm_cols
+        for col in ['high', 'low']:
+            if col in group.columns and col not in norm_cols:
+                group[col] = group[col] / base_value
+
         return group
 
-    # Normalize each day.
-    df_norm = df.groupby('date', group_keys=False).apply(normalize_group)
-    
-    # Rename columns as specified.
-    df_norm = df_norm.rename(columns={
-        'MA_15': 'SMA_15',
-        'MA_25': 'SMA_25',
-        'MA_100': 'SMA_100',
-        'chosen_slope': 'slope_10'
-    })
-    
-    # Create a new DataFrame with only the desired columns.
-    # (Keep 'date' and 'time' temporarily for groupby operations.)
-    df_proc = df_norm[['date', 'time', 'close', 'SMA_100', 'SMA_25', 'SMA_15', 'slope_10']].copy()
-    
-    # Define a function to compute run-length features for each day.
-    def compute_run_lengths(group):
-        # Compute sma_25_below_100_run_length.
-        condition = group['SMA_25'] < group['SMA_100']
-        group['sma_25_below_100_run_length'] = condition.groupby((~condition).cumsum()).cumcount() + 1
-        group.loc[~condition, 'sma_25_below_100_run_length'] = 0
-        
-        # Compute negative_slope_run_length.
-        neg_condition = group['slope_10'] < 0
-        group['negative_slope_run_length'] = neg_condition.groupby((~neg_condition).cumsum()).cumcount() + 1
-        group.loc[~neg_condition, 'negative_slope_run_length'] = 0
-        
-        # Compute positive_slope_run_length.
-        pos_condition = group['slope_10'] > 0
-        group['positive_slope_run_length'] = pos_condition.groupby((~pos_condition).cumsum()).cumcount() + 1
-        group.loc[~pos_condition, 'positive_slope_run_length'] = 0
-        
-        return group
 
-    # print(df_proc)
-    # exit()
-    df_features = df_proc.groupby('date', group_keys=False).apply(compute_run_lengths)
-    
-    # Select and order the final columns as required.
-    final_columns = ['close', 'SMA_100', 'SMA_25', 'SMA_15', 'slope_10',
-                     'sma_25_below_100_run_length', 'negative_slope_run_length', 'positive_slope_run_length']
-    result_df = df_features[final_columns].copy()
-    return result_df
+    df_normalized = df.groupby('date', group_keys=False).apply(normalize_group)
+    return df_normalized
+
 
 ###############################################################################
 #                         5. MASTER ANALYSIS FUNCTION                         #
@@ -1255,6 +1503,7 @@ def run_analysis(
         # Plot close if requested
         if plot_config.plot_close:
             recent_time = plot_close_chart_for_day(selected_df, date_str, plot_config)
+            # exit()
 
         # Collect stats if desired
         if collect_stats:
@@ -1353,11 +1602,11 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
             # If your code might default or raise an error
             print(f"Warning: slope_source '{config.slope_source}' not recognized; using 'close' by default.")
             slope_series = df['close']
-        df['chosen_slope'] = slope_series.rolling(config.slope_lookback).apply(
+        df['slope_10'] = slope_series.rolling(config.slope_lookback).apply(
             slope_of_best_fit, raw=True
         )
         
-        local_min_indices = find_local_minima(df['chosen_slope'], threshold=-0.09)
+        local_min_indices = find_local_minima(df['slope_10'], threshold=-0.09)
         # local_min_indices = []
         # arr = df["close"].to_numpy()
         # for i in range(1, len(arr) - 1):
@@ -1397,7 +1646,18 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         # ----------------------------------------------------
         # 4) Sleep until next minute
         # ----------------------------------------------------
-        time.sleep(60)  # Sleep for 60 seconds
+        # time.sleep(60)  # Sleep for 60 seconds
+        now = datetime.datetime.now()
+
+        # Calculate the start of the next minute
+        next_minute = (now + datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
+
+        # Compute the delay in seconds until the next minute starts
+        delay = (next_minute - now).total_seconds()
+        print(f"Sleeping for {delay:.2f} seconds until the start of the minute...")
+
+        # Sleep until the next minute boundary
+        time.sleep(delay)
 
         # NOTE: This loop will run indefinitely.
         # Press Ctrl+C (or otherwise terminate) to stop.
@@ -1411,7 +1671,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(script_path)
     os.chdir(script_dir)
     
-    model_path = "other_analysis/random_forest_model.pkl"
+    model_path = "other_analysis/high_buy_random_forest_model.pkl"
     with open(model_path, 'rb') as f:
         rf_classifier = pickle.load(f)
     # new_sample = np.array([[1.0, 0.95, 0.97, 0.98, -0.02, 3, 0, 1]])
@@ -1420,6 +1680,12 @@ if __name__ == "__main__":
     # print("Prediction for new sample:", prediction)
     # exit()
 
+    model_path = "other_analysis/neg_slope_model.pkl"
+    with open(model_path, 'rb') as f:
+        neg_rf_classifier = pickle.load(f)
+    model_path = "other_analysis/pos_slope_model.pkl"
+    with open(model_path, 'rb') as f:
+        pos_rf_classifier = pickle.load(f)
     # Example usage:
     #   1) Basic config: just close, no volume
     config = PlotConfig(
@@ -1429,22 +1695,40 @@ if __name__ == "__main__":
         add_moving_averages=True,
         ma_windows=(15, 25, 100),
         restrict_830_to_300=True,
-        highlight_negative_slope_runs=True,
-        highlight_below_ma_runs=True,
+        highlight_negative_slope_runs=False,
+        highlight_below_ma_runs=False,
+        highlight_buy_predictions=True,
         find_local_minima_in_slope=True,
+        high_buy_overlay_min_width = 4,
         save_plots=True,
         # show_plots=True,
         slope_source='close',
         slope_lookback=10,
-        rand_forest_class = rf_classifier
+        use_neg_pos_models = True,
+        rand_forest_class = rf_classifier,
+        neg_classifier = neg_rf_classifier,
+        pos_classifier = pos_rf_classifier
     )
+
+    # now = datetime.datetime.now(central)
+
+    # # Create target time for today at 8:35 AM
+    # target = now.replace(hour=8, minute=35, second=0, microsecond=0)
+    # if now < target:
+    #     # Compute the delay in seconds
+    #     delay = (target - now).total_seconds()
+    #     print(f"Waiting for {delay:.0f} seconds until {target.strftime('%Y-%m-%d %H:%M:%S %Z')}...")
+
+    #     # Delay execution
+    #     time.sleep(delay)
+
 
     # start_monitoring(config=config, minutes_interval=30)
     df, _ = run_analysis(
         symbol="SPY",
         # start_date="2020-01-01",
-        start_date="2025-02-01",
-        end_date="2025-02-14",
+        start_date="2024-10-01",
+        end_date="2025-02-15",
         plot_config=config,
         collect_stats=True,
         use_yahoo = False

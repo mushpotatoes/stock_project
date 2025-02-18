@@ -49,7 +49,7 @@ def store_stock_data(data, symbol, repo_root):
         repo_root (str): Root directory of the Git repository.
     """
 
-    conn = sqlite3.connect(os.path.join(repo_root, f"{symbol}_data.db"))
+    conn = sqlite3.connect(os.path.join(repo_root, f"big_{symbol}_data.db"))
     cursor = conn.cursor()
 
     for row in data:
@@ -89,34 +89,39 @@ def store_stock_data(data, symbol, repo_root):
 def main():
     api_key = os.environ.get('API_KEY')
     symbol = 'SPY'
-    start_date = '2025-02-01'
-    today = datetime.date.today()
-    end_date = today.strftime("%Y-%m-%d")
-    # end_date = '2025-01-28'
-    delta = datetime.timedelta(days=14)
+    # symbol = 'DIA'
+    # symbol = 'QQQ'
+    # symbol = 'IWM' # Small Cap
+    # symbol = 'MDY' # Small Cap
+    for symbol in ['DIA', 'QQQ', 'MDY', 'IWM']:
+        start_date = '2004-01-01'
+        today = datetime.date.today()
+        end_date = today.strftime("%Y-%m-%d")
+        # end_date = '2025-01-28'
+        delta = datetime.timedelta(days=14)
 
-    repo_root = get_git_repo_root()
-    if not repo_root:
-        logging.error("Not inside a Git repository.")
-        exit()
-    current_date = datetime.date(2025, 1, 26)
-    while current_date <= datetime.date(today.year, today.month, today.day):
-        start_date = current_date
-        end_date = min(current_date + delta, datetime.date(today.year, today.month, today.day))
-        next_url = None
+        repo_root = get_git_repo_root()
+        if not repo_root:
+            logging.error("Not inside a Git repository.")
+            exit()
+        current_date = datetime.date(2004, 1, 1)
+        while current_date <= datetime.date(today.year, today.month, today.day):
+            start_date = current_date
+            end_date = min(current_date + delta, datetime.date(today.year, today.month, today.day))
+            next_url = None
 
-        logging.debug(f"Getting data for start date: {start_date}")
-        while True:
-            data, next_url = fetch_stock_data(api_key, symbol, start_date.strftime('%Y-%m-%d'), end_date, next_url)
-            if not data:
-                break
+            logging.debug(f"Getting data for start date: {start_date}")
+            while True:
+                data, next_url = fetch_stock_data(api_key, symbol, start_date.strftime('%Y-%m-%d'), end_date, next_url)
+                if not data:
+                    break
 
-            store_stock_data(data, symbol, repo_root)
-            if not next_url:
-                break
+                store_stock_data(data, symbol, repo_root)
+                if not next_url:
+                    break
+                time.sleep(1)
+            current_date += delta + datetime.timedelta(days=1)
             time.sleep(1)
-        current_date += delta + datetime.timedelta(days=1)
-        time.sleep(1)
 
 if __name__ == "__main__":
     script_path = os.path.abspath(__file__)
