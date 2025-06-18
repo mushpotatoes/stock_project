@@ -161,8 +161,8 @@ def main():
 
     # --- User-defined parameters ---
     underlying_symbol = "SPY"         # Underlying asset symbol.
-    eval_date = "2025-01-27"            # Date for which to retrieve the data.
-    strike_price = 598.0              # Desired strike price.
+    eval_date = "2025-06-11"            # Date for which to retrieve the data.
+    strike_price = 602.0              # Desired strike price.
     expiration_date = eval_date      # Expiration date of the option contract.
     # --------------------------------
 

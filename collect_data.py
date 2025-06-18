@@ -105,7 +105,7 @@ def main():
         if not repo_root:
             logging.error("Not inside a Git repository.")
             exit()
-        current_date = datetime.date(2025, 2, 10)
+        current_date = datetime.date(2025, 6, 10)
         while current_date <= datetime.date(today.year, today.month, today.day):
             start_date = current_date
             end_date = min(current_date + delta, datetime.date(today.year, today.month, today.day) + datetime.timedelta(days=1))

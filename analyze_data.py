@@ -178,6 +178,141 @@ def on_event_message(message):
 # -----------------------------------------------------------------------------
 # Prediction Overlay Helper Functions
 # -----------------------------------------------------------------------------
+def scale_01_limited_stretch(arr, min_range_threshold=0.1):
+    """
+    Rescales a NumPy array to the range [0, 1], but limits stretching
+    if the original range is smaller than a threshold.
+
+    Args:
+        arr (np.ndarray): Input array. Assumed to have values within [0, 1].
+        min_range_threshold (float): The minimum range width to use for scaling.
+                                     If the actual data range is smaller, scaling
+                                     will be performed as if the range was this width,
+                                     centered around the data's midpoint. Must be > 0.
+
+    Returns:
+        np.ndarray: Array scaled potentially to a sub-interval of [0, 1].
+    """
+    if min_range_threshold <= 0:
+        raise ValueError("min_range_threshold must be greater than 0")
+
+    min_val = arr.min()
+    max_val = arr.max()
+    actual_range = max_val - min_val
+
+    # Handle the edge case where all values are the same initially
+    if actual_range == 0:
+         # If range is zero, no scaling needed or possible in a meaningful way.
+         # Return a constant array. Since input is [0,1], returning the
+         # constant value itself seems reasonable. Or map to 0.5? Let's return the value.
+         # Clipping ensures it stays within [0,1] just in case.
+         print("Warning: Input array has zero range.")
+         # return np.full_like(arr, np.clip(min_val, 0.0, 1.0), dtype=np.float64)
+         # Or return zeros consistent with the basic scaler
+         return np.zeros_like(arr, dtype=np.float64)
+
+
+    # Determine the effective min and max for scaling
+    if actual_range < min_range_threshold:
+        # Center the threshold range around the midpoint of the actual data
+        mid = (min_val + max_val) / 2.0
+        effective_min = mid - min_range_threshold / 2.0
+        effective_max = mid + min_range_threshold / 2.0
+
+        # Ensure the effective bounds stay within [0, 1]
+        effective_min = max(0.0, effective_min)
+        effective_max = min(1.0, effective_max)
+
+        # Recalculate effective range, it might be clipped
+        effective_range = effective_max - effective_min
+
+         # Handle extremely rare case where clipping collapses the effective range to zero
+        if effective_range <= 1e-9: # Use epsilon for float comparison
+            print("Warning: Effective range collapsed to zero after thresholding and clipping.")
+            # Fallback: return values mapped to the single effective point
+            # This point is effective_min (which equals effective_max)
+            # Scaled relative to [0,1], this value is just effective_min itself.
+            # return np.full_like(arr, effective_min, dtype=np.float64)
+            # Or return zeros consistent with other zero-range cases
+            return np.zeros_like(arr, dtype=np.float64)
+
+        print(f"Info: Actual range {actual_range:.4f} < threshold {min_range_threshold:.4f}. Using effective range [{effective_min:.4f}, {effective_max:.4f}].")
+        scale_min = effective_min
+        scale_range = effective_range
+    else:
+        # Use the actual data range for scaling
+        scale_min = min_val
+        scale_range = actual_range
+
+    # Apply scaling formula using the chosen min and range
+    scaled_arr = (arr - scale_min) / scale_range
+    print(f"Scale min: {scale_min}; Scale range: {scale_range}")
+
+    # Clip the final result to ensure it's strictly within [0, 1]
+    # This is important especially when using the effective range,
+    # as the original data might slightly exceed the calculated effective bounds.
+    return np.clip(scaled_arr, 0.0, 1.0)
+
+def center_mean_05_rescale(arr):
+  """
+  Shifts the array mean to 0.5 and rescales if necessary to fit [0, 1].
+
+  Args:
+    arr (np.ndarray): Input array.
+
+  Returns:
+    np.ndarray: Array with mean guaranteed to be 0.5 and values in [0, 1].
+  """
+  if arr.size == 0:
+      return arr # Return empty array if input is empty
+      
+  # Ensure array is float for calculations
+  arr = arr.astype(np.float64)
+
+  target_mean = 0.5
+  current_mean = arr.mean()
+
+  # 1. Shift the array so the mean is target_mean (0.5)
+  shifted_arr = arr + (target_mean - current_mean)
+
+  # 2. Check the range of the shifted array
+  min_shifted = shifted_arr.min()
+  max_shifted = shifted_arr.max()
+
+  # If already within [0, 1], we're done
+  if min_shifted >= 0.0 and max_shifted <= 1.0:
+      # Check for potential floating point issues very close to boundaries
+      return np.clip(shifted_arr, 0.0, 1.0)
+
+  # 3. If outside [0, 1], calculate the necessary scaling factor
+  #    We want to scale around the target_mean.
+  #    Formula: final = scale_factor * (shifted - target_mean) + target_mean
+  #    We need:
+  #    0 <= scale_factor * (min_shifted - target_mean) + target_mean  => scale_factor <= target_mean / (target_mean - min_shifted) [if min_shifted < 0]
+  #    1 >= scale_factor * (max_shifted - target_mean) + target_mean  => scale_factor <= (1 - target_mean) / (max_shifted - target_mean) [if max_shifted > 1]
+
+  scale_factor = 1.0
+  epsilon = 1e-9 # To avoid division by zero if min/max is exactly 0.5
+
+  if min_shifted < 0.0:
+      # How much scaling is needed to bring min_shifted to 0?
+      scale_low = target_mean / (target_mean - min_shifted + epsilon)
+      scale_factor = min(scale_factor, scale_low)
+
+  if max_shifted > 1.0:
+      # How much scaling is needed to bring max_shifted to 1?
+      scale_high = (1.0 - target_mean) / (max_shifted - target_mean + epsilon)
+      scale_factor = min(scale_factor, scale_high)
+
+  # Ensure scale factor is not negative (shouldn't happen with target_mean=0.5)
+  scale_factor = max(0.0, scale_factor)
+
+  # 4. Apply the scaling transformation
+  final_arr = scale_factor * (shifted_arr - target_mean) + target_mean
+
+  # Final clip for safety due to potential float inaccuracies
+  return np.clip(final_arr, 0.0, 1.0)
+
 def get_prediction_runs(predicted_classes, min_width):
     """
     Compute runs (start, end) where predicted_classes == 1 consecutively
@@ -511,6 +646,7 @@ def add_sma_run_length(df, sma25_col='SMA_25', sma100_col='SMA_100', new_col='sm
     return df_with_run
 
 def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
+    in_green = False
     # Prepare datetime for plotting
     day_df['time'] = pd.to_datetime(day_df['time'], format="%H:%M:%S").dt.time
     day_df['date'] = pd.to_datetime(day_df['date'], format='%Y-%m-%d').dt.date
@@ -574,17 +710,30 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         for window in config.ma_windows:
             ax1.plot(day_df_plot['datetime'], day_df_plot[f"MA_{window}"], label=f"MA_{window}")
     ax1.set_ylabel('Close')
+    below_runs = False
     if config.highlight_below_ma_runs:
         # Create a boolean series: True where 25-min MA is below 100-min MA
-        condition = day_df_plot['MA_25'] < day_df_plot['MA_100']
+        # condition = (day_df_plot['MA_25'] < day_df_plot['MA_100'])
+        condition = (forest_day_df['SMA_25'] < forest_day_df['SMA_100']) & \
+                    ((forest_day_df['SMA_10'] < forest_day_df['SMA_25']) | (forest_day_df['slope_120'] < -0.9))
+
         # Convert to integers (1 for True, 0 for False) so we can use get_prediction_runs
         condition_int = condition.astype(int).to_numpy()
         # Identify runs that last at least 30 minutes (i.e. 30 consecutive points)
-        ma_runs = get_prediction_runs(condition_int, config.ma_run_len)
+        ma_runs = get_prediction_runs(condition_int, config.ma_run_len + 1)
         # Create a new list with the adjusted start times by adding 30 to each run's start index
         adjusted_ma_runs = [(start + config.ma_run_len, end) for start, end in ma_runs]
         # Shade these runs on ax1; adjust facecolor, edgecolor, and alpha as desired
-        shade_prediction_runs(ax1, day_df_plot, adjusted_ma_runs, facecolor='lightgreen', edgecolor='none', alpha=0.3)
+        shade_prediction_runs(ax1, day_df_plot,
+                              adjusted_ma_runs,
+                              facecolor='green',
+                              edgecolor='green',
+                              alpha=0.1, hatch='//')
+        
+        # in_green = condition.values[-1]
+        in_green = condition.tail(30).all()
+        
+
     ax1.legend(loc='upper right')
     ax1.grid(True)
     
@@ -603,18 +752,97 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         logging.debug("Applying strict prediction overlays")
         if forest_day_df['slope_10'].mean() < 0:
             extra_predicted_classes = config.neg_classifier.predict(forest_day_df)
+            extra_up_predicted_classes = config.pos_classifier.predict(forest_day_df)
+            extra_up_predicted_probs = config.pos_classifier.predict_proba(forest_day_df)[:,1]
         else:
-            extra_predicted_classes = config.pos_classifier.predict(forest_day_df)
+            extra_predicted_classes = config.neg_classifier.predict(forest_day_df)
+            extra_up_predicted_classes = config.pos_classifier.predict(forest_day_df)
+            extra_up_predicted_probs = config.pos_classifier.predict_proba(forest_day_df)[:,1]
+        # print((extra_up_predicted_probs > 0.5).astype(int))
+        # print(extra_up_predicted_classes)
+        # exit()
         extra_runs = get_prediction_runs(extra_predicted_classes, config.high_buy_overlay_min_width)
-        if extra_predicted_classes[-1] == 1:
+        if (extra_predicted_classes[-1] == 1) or (extra_up_predicted_probs[-1] > 0.55):
             extra_in_window = True
-        shade_prediction_runs(ax1, day_df_plot, extra_runs, facecolor='plum', edgecolor='purple', alpha=0.2)
+        shade_prediction_runs(ax1, day_df_plot, extra_runs, facecolor='plum', edgecolor='purple', alpha=0.2, hatch='..')
+
+        # if(forest_day_df['d2_120'].std() < 0.6) and (day_df['time'].iloc[-1] > ):
+        #     logging.info(f"Processing {date_str} {day_df['time'].iloc[-1]}")
+        #     # logging.info(f"Slope 120 mean: {forest_day_df['slope_120'].mean()}, std. dev.: {forest_day_df['slope_120'].std()}")
+        #     logging.info(f"d2 120 mean: {forest_day_df['d2_120'].mean()}, std. dev.: {forest_day_df['d2_120'].std()}")
+        #     scale_01_limited_stretch(extra_up_predicted_probs, min_range_threshold=0.1)
+        #     scale_min = 0.01
+        #     scale_range = 0.65
+        #     scaled_arr = (extra_up_predicted_probs - scale_min) / scale_range
+        #     # print(f"Scale min: {scale_min}; Scale range: {scale_range}")
+
+        #     # Clip the final result to ensure it's strictly within [0, 1]
+        #     # This is important especially when using the effective range,
+        #     # as the original data might slightly exceed the calculated effective bounds.
+        #     extra_up_predicted_probs = np.clip(scaled_arr, 0.0, 1.0)
+            
+    # scaled_arr = (arr - scale_min) / scale_range
+    # print(f"Scale min: {scale_min}; Scale range: {scale_range}")
+        # min_range_threshold=0.1
+        # min_val = extra_up_predicted_probs.min()
+        # max_val = extra_up_predicted_probs.max()
+        # actual_range = max_val - min_val
+        # print(extra_up_predicted_probs.mean())
+        # if extra_up_predicted_probs.mean() > 0.7:
+        #     extra_up_predicted_probs = center_mean_05_rescale(extra_up_predicted_probs)
+
+        # print(min(extra_up_predicted_probs))
+        # print(max(extra_up_predicted_probs))
+        # print(type(extra_up_predicted_probs))
+        # if min(extra_up_predicted_probs) > 0.25:
+        #     extra_up_predicted_probs = extra_up_predicted_probs - 0.2
+        
+        # Set the gradient probabilities
+        for probs in np.arange(0.55, 1.01, 0.05):
+            # low_prob = (extra_up_predicted_probs > (0.5 + probs)).astype(int)
+            low_prob = (extra_up_predicted_probs > (probs)).astype(int)
+            # print(low_prob)
+            # input()
+            # if forest_day_df['slope_10'].mean() < 0:
+            extra_up_runs = get_prediction_runs(low_prob, 3)
+            # print(extra_up_runs)
+            if probs == 0.55:
+                ec = 'purple'
+            else:
+                ec = None
+            # if probs > 0.2:
+            if probs > 0.8:
+                alpha_setting = 0.15
+            else:
+                alpha_setting = 0.07
+            shade_prediction_runs(ax1, day_df_plot, extra_up_runs, 
+                                  facecolor='red', edgecolor=ec, alpha=(alpha_setting))#, hatch='.')
+
+        for probs in np.arange(0.45, -0.01, -0.05):
+            # low_prob = (extra_up_predicted_probs > (0.5 + probs)).astype(int)
+            low_prob = (extra_up_predicted_probs < (probs)).astype(int)
+            # print(low_prob)
+            # input()
+            # if forest_day_df['slope_10'].mean() < 0:
+            extra_up_runs = get_prediction_runs(low_prob, 3)
+            # print(extra_up_runs)
+            if probs == 0.45:
+                ec = 'navy'
+            else:
+                ec = None
+            # if probs > 0.2:
+            if probs < 0.2:
+                alpha_setting = 0.1
+            else:
+                alpha_setting = 0.05
+            shade_prediction_runs(ax1, day_df_plot, extra_up_runs, 
+                                  facecolor='blue', edgecolor=ec, alpha=(alpha_setting))#, hatch='.')
 
     if config.use_down_models and len(forest_day_df) != 0:
         down_predicted_classes = config.down_classifier.predict(forest_day_df)
         down_runs = get_prediction_runs(down_predicted_classes, config.high_buy_overlay_min_width)
         # print(down_runs)
-        shade_prediction_runs(ax1, day_df_plot, down_runs, facecolor='gray', edgecolor='gray', alpha=0.2, hatch='//')
+        shade_prediction_runs(ax1, day_df_plot, down_runs, facecolor='gray', edgecolor='gray', alpha=0.2, hatch='\\\\')
 
     # Bottom subplot: 10 Minute Slope
     ax3.plot(day_df_plot['datetime'], forest_day_df['slope_10'], label='10 Minute Slope', color='orange')
@@ -703,9 +931,9 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
         recent_time = None
     if recent_time:
         print(f"[{date_str}]: Most recent blue section (long run) starts at: {recent_time.strftime('%H:%M')}")
-        return recent_time.strftime('%H:%M'), extra_in_window
+        return recent_time.strftime('%H:%M'), extra_in_window, in_green
     else:
-        return None, extra_in_window
+        return None, extra_in_window, in_green
 
 # -----------------------------------------------------------------------------
 # Statistics Collection & Feature Normalization
@@ -868,7 +1096,6 @@ def run_analysis(symbol="SPY", start_date="2024-01-01", end_date="2024-01-31",
     # Process data day-by-day
     for single_date in date_range:
         date_str = single_date.strftime('%Y-%m-%d')
-        logging.info(f"Processing {date_str}")
         # Define the epoch range based on whether volume plotting is enabled
         if plot_config.plot_volume:
             start_epoch = int(convert_to_epoch(date_str, "08:30:00"))
@@ -880,20 +1107,21 @@ def run_analysis(symbol="SPY", start_date="2024-01-01", end_date="2024-01-31",
         selected_df = filter_epoch_range(df, start_epoch, end_epoch)
         if selected_df.empty:
             continue
+        logging.info(f"Processing {date_str}")
 
         # Plot volume chart if enabled
         if plot_config.plot_volume:
             _ = plot_volume_chart_for_day(selected_df, date_str, plot_config)
         # Plot close chart and capture any prediction timing info if enabled
         if plot_config.plot_close:
-            recent_time, in_purple = plot_close_chart_for_day(selected_df, date_str, plot_config)
+            recent_time, in_purple, in_green = plot_close_chart_for_day(selected_df, date_str, plot_config)
         # Collect daily statistics if requested
         if collect_stats:
             day_stats = compute_daily_stats(selected_df, date_str)
             all_stats.append(day_stats)
 
     stats_df = pd.DataFrame(all_stats)
-    return ret_df, recent_time, in_purple
+    return ret_df, recent_time, in_purple, in_green
 
 
 def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = None):
@@ -901,9 +1129,9 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
     known_minima = set()        # Track discovered local minima indices
     current_minima = 0
     last_recent_time = None
-    threshold_time = datetime.time(15, 0)  # Monitoring stops after 15:00
-    target_start = datetime.time(8, 32)    # Data collection starts just after market open
-    target_wakeup = datetime.time(8, 32, 30)  # Wake-up time slightly after start
+    threshold_time = datetime.time(14, 0)  # Monitoring stops after 15:00
+    target_start = datetime.time(9, 5)    # Data collection starts just after market open
+    target_wakeup = datetime.time(9, 5)  # Wake-up time slightly after start
     today = datetime.date.today()
     # Create datetime objects for target start and wake-up times
     start_dt = datetime.datetime.combine(today, target_start)
@@ -918,15 +1146,25 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         tomorrow = today + datetime.timedelta(days=1)
         formatted_tomorrow = tomorrow.strftime("%Y-%m-%d")
         now_time = datetime.datetime.now().time()
+        today = datetime.date.today()
 
-        # Stop monitoring if current time is past the threshold
-        if now_time > threshold_time:
+        if today.weekday() >= 5:
             exit()
+        # Stop monitoring if current time is past the threshold
+        if now_time > threshold_time or now_time.hour < 8:
+            seconds_to_sleep = 1800
+            now_dt = datetime.datetime.now()
+            print(f"=========== [{now_dt.time().strftime('%H:%M:%S')}] Sleeping 30 minutes ===========")
+            time.sleep(seconds_to_sleep)
+            continue
 
         now_dt = datetime.datetime.now()
         # Wait until the target start time if current time is earlier
+        start_dt = datetime.datetime.combine(today, target_start)
         if now_dt < start_dt:
             seconds_to_sleep = (wakeup_dt - now_dt).total_seconds()
+            if seconds_to_sleep < 0:
+                seconds_to_sleep = 600
             print(f"=========== [{now_dt.time().strftime('%H:%M:%S')}] Waiting until {target_wakeup.strftime('%H:%M')} ===========")
             time.sleep(seconds_to_sleep)
             now_dt = datetime.datetime.now()
@@ -934,7 +1172,7 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         print(f"=========== [{now_time.strftime('%H:%M:%S')}] Fetching Stock Data ===========")
         try:
             # Run the analysis for today's data (from today to tomorrow)
-            df, recent_time, in_purple = run_analysis(
+            df, recent_time, in_purple, in_green = run_analysis(
                 symbol="SPY",
                 start_date=formatted_today,
                 end_date=formatted_tomorrow,
@@ -977,9 +1215,10 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
             last_in_purple = in_purple
             if in_purple:
                 purp_str = f"Start of purple region {now_dt.strftime('%H:%M')}"
-            else:
-                purp_str = f"End of purple region {now_dt.strftime('%H:%M')}"
-            on_event_message(purp_str)
+                on_event_message(purp_str)
+            # else:
+            #     purp_str = f"End of purple region {now_dt.strftime('%H:%M')}"
+            # on_event_message(purp_str)
         # Trigger event if a new recent prediction time is detected
         elif recent_time != last_recent_time:
             last_recent_time = recent_time
@@ -987,6 +1226,13 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         # Otherwise, trigger an interval event at the specified minutes_interval
         elif now_time.minute % minutes_interval == 0:
             on_interval_elapsed(df)
+        elif (now_time.minute % 5 == 0) and in_green:
+            on_event_message("In green region")
+        elif (now_time.minute % 5 == 0) and in_purple:
+            on_event_message("In purple region")
+        
+        # if now_time > datetime.time(12, 0):
+        #     minutes_interval = 15
 
         # Calculate delay until the start of the next minute and sleep for that duration
         now = datetime.datetime.now()
@@ -1027,7 +1273,7 @@ if __name__ == "__main__":
         highlight_below_ma_runs=True,
         ma_run_len = 35,
         highlight_buy_predictions=False,
-        use_down_models=True,
+        use_down_models=False,
         find_local_minima_in_slope=True,
         high_buy_overlay_min_width=2,
         save_plots=True,
@@ -1044,16 +1290,19 @@ if __name__ == "__main__":
     # creds = flow.run_local_server(port=0)
     # with open("token.json", "w") as token:
     #     token.write(creds.to_json())
-    # start_monitoring(config=config, minutes_interval=10)
+    start_monitoring(config=config, minutes_interval=10)
+
     # on_event_message("test")
-    df, _, _ = run_analysis(
-        symbol="SPY",
-        # start_date="2025-01-01",
-        start_date="2025-03-01",
-        end_date="2025-03-05",
-        plot_config=config,
-        collect_stats=True,
-        use_yahoo=False,
-        use_sql=True
-    )
+
+    # df, _, _, _ = run_analysis(
+    #     symbol="SPY",
+    #     # start_date="2023-01-01",
+    #     start_date="2025-06-16",
+    #     # end_date="2025-04-02",
+    #     end_date="2025-06-20",
+    #     plot_config=config,
+    #     collect_stats=True,
+    #     use_yahoo=False,
+    #     use_sql=True
+    # )
     

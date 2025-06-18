@@ -19,14 +19,14 @@ from sklearn.metrics import (accuracy_score, classification_report, confusion_ma
 # Global threshold constant for classification.
 # RATIO_THRESHOLD = 1.002
 # RATIO_THRESHOLD = 1.0015
-RATIO_THRESHOLD = 0.999
+RATIO_THRESHOLD = 0.9975
 # SLOPE_THRESHOLD = 0.0005
 SLOPE_THRESHOLD = 0.0000016536
 SLOPE_THRESHOLD = 0.00002
 if RATIO_THRESHOLD > 1:
     EVAL_RATIO = 1.0001
 else:
-    EVAL_RATIO = 0.9999
+    EVAL_RATIO = 0.999
 # EVAL_RATIO = 0
 # EVAL_RATIO = 0.0000016536
 
@@ -315,11 +315,47 @@ def train_random_forest(train_df, random_state=42):
     y_train = train_df['target']
 
     clf = RandomForestClassifier(random_state=random_state,
-                                 n_estimators=100,
+                                 n_estimators=200,
                                  max_features=10,
-                                 class_weight={0:1, 1:100},
+                                #  class_weight={0:10, 1:1},
+                                 class_weight=None,
                                  n_jobs=4)
-    clf.fit(X_train, y_train)
+    mean = 0.9983045337299954
+    median = 0.9991301203341799
+    sigma = 0.0029079728310040004
+    
+    # min - 0.9026200277163384
+    # max - 1.070147309349634
+    # most common bin was close tp 0.9998
+    # So far, 0.25 around the mean has precision of 75% (8% Recall)
+    # So far, 0.10 around the mean has precision of 72% (16% Recall)
+    # So far, 0.10 around the median has precision of 72% (18% Recall)
+    # lower_bound = median - 0.2 * sigma
+    # upper_bound = median + 0.2 * sigma
+    sample_weights = np.ones(len(train_df), dtype=float)
+    sample_weights[train_df['future_ratio'] < 1.0] *= 2.0
+    sample_weights[train_df['future_ratio'] < 0.998] *= 5.0
+    sample_weights[train_df['future_ratio'] > 1.01] *= 2.0
+    sample_weights[train_df['future_ratio'] > 1.02] *= 5.0
+    # sample_weights[train_df['future_ratio'] > 1.0] *= 5.0
+    # sample_weights[train_df['future_ratio'] > 1.0005] *= 7.0
+    # sample_weights[train_df['future_ratio'] > 1.0010] *= 11.0
+    # sample_weights[train_df['future_ratio'] > 1.0015] *= 13.0
+    # sample_weights[train_df['future_ratio'] < RATIO_THRESHOLD - 0.0005] *= 5.0
+    # sample_weights[train_df['future_ratio'] > mean + (0.5 * sigma)] *= 2.0
+    # sample_weights[train_df['future_ratio'] > mean + sigma] *= 10.0
+    # sample_weights[train_df['future_ratio'] > mean + (1.5 * sigma)] *= 10.0
+    # sample_weights[train_df['future_ratio'] > mean + (2.0 * sigma)] *= 20.0
+    # sample_weights[train_df['future_ratio'] < mean - (0.5 * sigma)] *= 2.0
+    # sample_weights[train_df['future_ratio'] < mean - sigma] *= 2.0
+    # sample_weights[train_df['future_ratio'] < mean - (1.5 * sigma)] *= 5.0
+    # sample_weights[train_df['future_ratio'] < mean - (2.0 * sigma)] *= 10.0
+    # print(f"sigmas: {0.5 * sigma + mean:.4f}; {sigma + mean:.4f}; {1.5 * sigma + mean:.4f}; {2 * sigma + mean:.4f}; ")
+    # print(f"        {-0.5 * sigma + mean:.4f}; {-sigma + mean:.4f}; {-1.5 * sigma + mean:.4f}; {-2 * sigma + mean:.4f}; ")
+    # mask_outside = (train_df['future_ratio'] > lower_bound) & (train_df['future_ratio'] < upper_bound)
+    # sample_weights[mask_outside] = 0
+
+    clf.fit(X_train, y_train, sample_weight=sample_weights)
 
     return clf
 
@@ -514,6 +550,8 @@ def evaluate_day_predictions(clf, df, day):
     day = datetime.strptime(day, "%Y-%m-%d").date()
 
     day_df = df[df['date'] == day].copy()
+    # print(day_df.iloc[0:60])
+    # print(day_df[['close', 'shift_close', 'future_ratio']].iloc[0:60])
     day_df.to_csv(f"pred{day}.csv")
     if day_df.empty:
         print(f"No data available for day: {day}")
@@ -879,11 +917,50 @@ def add_future_metrics(df, future_window=40):
         df['minutes_to_max_close'] = minutes_to_max
 
     else:
-        # --- Min case: simply compare the current value to the value 30 minutes ahead ---
-        # Assuming each row is 1 minute apart, the value 30 minutes from now is given by shift(-30).
-        df['future_ratio'] = df['close'] / df['close'].shift(-30)
-        # Calculate the time difference in minutes using the epoch_time column.
-        df['minutes_to_max_close'] = (df['epoch_time'].shift(-30) - df['epoch_time']) / 60.0
+        df['min_low_2'] = pd.concat([df['close'].shift(-1), df['close'].shift(-2)], axis=1).min(axis=1)
+        # print(df[['close','min_low_2']])
+        close_array = df['close'].values
+        epoch_array = df['epoch_time'].values  # assume epoch_time is in seconds
+        future_min_close = np.full(n, np.nan, dtype=float)
+        minutes_to_min = np.full(n, np.nan, dtype=float)
+
+        # Loop over each row. For row i, use the window starting at i+3.
+        for i in range(n):
+            start_idx = i + 3
+            end_idx = i + 3 + future_window  # window spans future_window rows
+            if end_idx > n:
+                continue
+
+            window_close = close_array[start_idx:end_idx]
+            min_close = window_close.min()
+            future_min_close[i] = min_close
+
+            # Get the first occurrence index of the minimum close within the window.
+            idx_in_window = int(np.argmin(window_close))
+            target_idx = start_idx + idx_in_window
+
+            # Compute the time difference (in minutes) using epoch_time (which is in seconds).
+            dt_minutes = (epoch_array[target_idx] - epoch_array[i]) / 60.0
+            minutes_to_min[i] = dt_minutes
+
+        df['future_ratio'] = future_min_close / df['min_low_2']
+        df.drop(columns=['min_low_2'], inplace=True)
+        df['minutes_to_min_close'] = minutes_to_min
+        # # # --- Min case: simply compare the current value to the value 30 minutes ahead ---
+        # # # Assuming each row is 1 minute apart, the value 30 minutes from now is given by shift(-30).
+        # # # Calculate the time difference in minutes using the epoch_time column.
+        # # df['shift_close'] = df['close'].shift(-30)
+        # # df['future_ratio'] = df['shift_close'] / df['close']
+        # # df['minutes_to_max_close'] = (df['epoch_time'].shift(-30) - df['epoch_time'])
+
+        # df['min_future_close'] = df['close'].iloc[::-1].rolling(window=40, min_periods=1).min().iloc[::-1]
+        # df['future_ratio'] = df['min_future_close'] / df['close']
+
+        # # df['shift_close'] = df['close'].shift(-30)
+        # # df['future_ratio'] = df['shift_close'] / df['close']
+        # df['minutes_to_max_close'] = (df['epoch_time'].shift(-30) - df['epoch_time'])
+
+
 
     return df
     # # --- 1. Compute max high over the next two points ---
@@ -1070,6 +1147,7 @@ def get_dates_with_negative_mean_slope(df, slope_column='slope_10'):
     
     # Select dates where the mean slope is below zero
     negative_dates = mean_slopes[mean_slopes < 0.00797].index.tolist()
+    # negative_dates = mean_slopes[mean_slopes < -0.015].index.tolist()
     
     return negative_dates
 
@@ -1091,7 +1169,7 @@ def main(model_type="classifier", retrain=False, model_path="new_random_forest_m
     
     central = pytz.timezone('US/Central')
     now = datetime.now(central)
-    print(f"Staring at {now.strftime('%H:%M:%S')}")
+    # print(f"Staring at {now.strftime('%H:%M:%S')}")
     # df = pd.read_csv("normed_dataset.csv")
     # df['time'] = pd.to_datetime(df['time'], format='%H:%M:%S').dt.time
     load_from_csv = True
@@ -1103,7 +1181,15 @@ def main(model_type="classifier", retrain=False, model_path="new_random_forest_m
         print("Loading and normalizing data...")
         df_normalized = load_and_normalize_data(norm_time)
         print(f"Dataframe {len(df_normalized)} after load_and_normalize_data")
-        
+        # df = df_normalized
+        # df['shift_close'] = df['close'].shift(-30)
+        # df['future_ratio'] = df['close'] / df['shift_close']
+        # print(df.iloc[20002:20062])
+        # exit()
+
+        # 0.993953
+        # 0.976458
+
         if 'downward_trend' in df_normalized.columns:
             df_normalized.drop(columns=['downward_trend'], inplace=True)            
 
@@ -1187,13 +1273,35 @@ def main(model_type="classifier", retrain=False, model_path="new_random_forest_m
 
     # exit()
 
+    # print(df['future_ratio'].min())
+    # print(df['future_ratio'].max())
+    # mean = df['future_ratio'].mean()
+    # median = df['future_ratio'].median()
+    # mode = df['future_ratio'].median()
+    # std = df['future_ratio'].std()
+    # print(mean, median)
+    # print(mode, std)
+    # plt.hist(df['future_ratio'], bins=1200, color='skyblue', alpha=0.75)
+    # plt.axvline(mean, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean:.4f}')
+
+    # # Add a vertical line for the median
+    # plt.axvline(median, color='green', linestyle='dashed', linewidth=2, label=f'Median: {median:.4f}')
+    # plt.axvline(mode, color='green', linestyle='dashed', linewidth=2, label=f'Mode: {mode:.4f}')
+
+    # plt.xlabel('Data Values')
+    # plt.ylabel('Frequency')
+    # plt.title('Histogram of data_column')
+    # plt.legend()
+    # plt.show()
+    # exit()
+
     negative_dates = get_dates_with_negative_mean_slope(df)
     # print("Dates with mean slope_10 below zero:", negative_dates)
-    # negative_slope_df = df[df['date'].isin(negative_dates)]
-    # other_df = df[~df['date'].isin(negative_dates)]
+    negative_slope_df = df[df['date'].isin(negative_dates)]
+    other_df = df[~df['date'].isin(negative_dates)]
 
-    print("Splitting dataset...")
-    train_df, val_df, test_df = split_dataset(df, train_frac=0.9, val_frac=0.10, test_frac=None, random_state=42)
+    # print("Splitting dataset...")
+    train_df, val_df, test_df = split_dataset(negative_slope_df, train_frac=0.9, val_frac=0.10, test_frac=None, random_state=42)
     if test_df is None:
         test_df_len = 0
     else:
@@ -1207,7 +1315,11 @@ def main(model_type="classifier", retrain=False, model_path="new_random_forest_m
             with open(model_path, "rb") as f:
                 model = pickle.load(f)
         else:
-            print("Training new Random Forest classifier...")
+            # print("Training new Random Forest classifier...")
+            # print(f"Training Data Stats:")
+            # print(f"    Mean = {test_df["future_ratio"].mean()}")
+            # print(f"    Median = {test_df["future_ratio"].median()}")
+            # print(f"    Std. Dev. = {test_df["future_ratio"].std()}")
             model = train_random_forest(train_df, random_state=42)
             with open(model_path, "wb") as f:
                 pickle.dump(model, f)
@@ -1271,17 +1383,19 @@ def main(model_type="classifier", retrain=False, model_path="new_random_forest_m
         evaluate_model(model, val_df)
         # Example evaluation for a specific day.
         # print(df['date'].unique)
-        # evaluate_day_predictions(model, df, '2025-01-02')
-        # evaluate_day_predictions(model, df, '2025-01-07')
-        # evaluate_day_predictions(model, df, '2025-01-10')
-        # evaluate_day_predictions(model, df, '2025-02-10')
-        # evaluate_day_predictions(model, df, '2025-02-10')
-        # evaluate_day_predictions(model, df, '2025-02-11')
-        # evaluate_day_predictions(model, df, '2025-02-12')
-        # evaluate_day_predictions(model, df, '2025-02-13')
-        # evaluate_day_predictions(model, df, '2025-02-14')
-        # evaluate_day_predictions(model, df, '2025-02-20')
-        # evaluate_day_predictions(model, df, '2025-02-21')
+        evaluate_day_predictions(model, df, '2025-01-02')
+        evaluate_day_predictions(model, df, '2025-01-07')
+        evaluate_day_predictions(model, df, '2025-01-10')
+        evaluate_day_predictions(model, df, '2025-02-10')
+        evaluate_day_predictions(model, df, '2025-02-11')
+        evaluate_day_predictions(model, df, '2025-02-12')
+        evaluate_day_predictions(model, df, '2025-02-13')
+        evaluate_day_predictions(model, df, '2025-02-14')
+        evaluate_day_predictions(model, df, '2025-02-20')
+        evaluate_day_predictions(model, df, '2025-02-21')
+        evaluate_day_predictions(model, df, '2025-02-25')
+        evaluate_day_predictions(model, df, '2025-02-26')
+        evaluate_day_predictions(model, df, '2025-02-27')
     else:
         print("Evaluating regressor on Validation Set:")
         evaluate_regression_model(model, val_df)
