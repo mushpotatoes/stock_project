@@ -653,7 +653,7 @@ def plot_close_chart_for_day(day_df, date_str, config: PlotConfig):
     day_df['datetime'] = day_df['time'].apply(lambda t: datetime.datetime.combine(day_df['date'].iloc[0], t))
 
     df_with_slopes = prepare_normalized_features(day_df)
-    day_df = compute_slopes_for_timeframe(10, day_df, False)
+    # day_df = compute_slopes_for_timeframe(10, day_df, False)
     timeframes = [15, 25, 100]
     for timeframe in timeframes:
         day_df[f'MA_{timeframe}'] = day_df.groupby('date')['close'].transform(lambda x: x.rolling(window=timeframe).mean())
@@ -1129,7 +1129,7 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
     known_minima = set()        # Track discovered local minima indices
     current_minima = 0
     last_recent_time = None
-    threshold_time = datetime.time(14, 0)  # Monitoring stops after 15:00
+    threshold_time = datetime.time(14, 1)  # Monitoring stops after 14:00
     target_start = datetime.time(9, 5)    # Data collection starts just after market open
     target_wakeup = datetime.time(9, 5)  # Wake-up time slightly after start
     today = datetime.date.today()
@@ -1148,10 +1148,10 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         now_time = datetime.datetime.now().time()
         today = datetime.date.today()
 
-        if today.weekday() >= 5:
+        if today.weekday() == 5 and now_time.hour < 12:
             exit()
         # Stop monitoring if current time is past the threshold
-        if now_time > threshold_time or now_time.hour < 8:
+        if now_time > threshold_time or now_time.hour < 9 or (now_time.hour == 9 and now_time.minute <= 30):
             seconds_to_sleep = 1800
             now_dt = datetime.datetime.now()
             print(f"=========== [{now_dt.time().strftime('%H:%M:%S')}] Sleeping 30 minutes ===========")
@@ -1161,13 +1161,13 @@ def start_monitoring(symbol="SPY", minutes_interval=15, config: PlotConfig = Non
         now_dt = datetime.datetime.now()
         # Wait until the target start time if current time is earlier
         start_dt = datetime.datetime.combine(today, target_start)
-        if now_dt < start_dt:
-            seconds_to_sleep = (wakeup_dt - now_dt).total_seconds()
-            if seconds_to_sleep < 0:
-                seconds_to_sleep = 600
-            print(f"=========== [{now_dt.time().strftime('%H:%M:%S')}] Waiting until {target_wakeup.strftime('%H:%M')} ===========")
-            time.sleep(seconds_to_sleep)
-            now_dt = datetime.datetime.now()
+        # if now_dt < start_dt:
+        #     seconds_to_sleep = (wakeup_dt - now_dt).total_seconds()
+        #     if seconds_to_sleep < 0:
+        #         seconds_to_sleep = 600
+        #     print(f"=========== [{now_dt.time().strftime('%H:%M:%S')}] Waiting until {target_wakeup.strftime('%H:%M')} ===========")
+        #     time.sleep(seconds_to_sleep)
+        #     now_dt = datetime.datetime.now()
 
         print(f"=========== [{now_time.strftime('%H:%M:%S')}] Fetching Stock Data ===========")
         try:
@@ -1290,19 +1290,19 @@ if __name__ == "__main__":
     # creds = flow.run_local_server(port=0)
     # with open("token.json", "w") as token:
     #     token.write(creds.to_json())
-    start_monitoring(config=config, minutes_interval=10)
+    # start_monitoring(config=config, minutes_interval=10)
 
     # on_event_message("test")
 
-    # df, _, _, _ = run_analysis(
-    #     symbol="SPY",
-    #     # start_date="2023-01-01",
-    #     start_date="2025-06-16",
-    #     # end_date="2025-04-02",
-    #     end_date="2025-06-20",
-    #     plot_config=config,
-    #     collect_stats=True,
-    #     use_yahoo=False,
-    #     use_sql=True
-    # )
+    df, _, _, _ = run_analysis(
+        symbol="SPY",
+        # start_date="2022-09-01",
+        start_date="2025-08-05",
+        # end_date="2025-04-02",
+        end_date="2025-08-08",
+        plot_config=config,
+        collect_stats=True,
+        use_yahoo=False,
+        use_sql=True
+    )
     

@@ -88,14 +88,14 @@ def store_stock_data(data, symbol, repo_root):
 
 def main():
     api_key = os.environ.get('API_KEY')
-    symbol = 'SPY'
+    # symbol = 'SPY'
     # symbol = 'DIA'
     # symbol = 'QQQ'
     # symbol = 'IWM' # Small Cap
     # symbol = 'MDY' # Small Cap
     # for symbol in ['DIA', 'QQQ', 'MDY', 'IWM']:
     for symbol in ['SPY']:
-        start_date = '2025-02-13'
+        start_date = '2025-07-01'
         today = datetime.date.today()
         # end_date = today.strftime("%Y-%m-%d") + datetime.timedelta(days=1)
         # end_date = '2025-01-28'
@@ -105,7 +105,7 @@ def main():
         if not repo_root:
             logging.error("Not inside a Git repository.")
             exit()
-        current_date = datetime.date(2025, 6, 10)
+        current_date = datetime.date(2025, 8, 7)
         while current_date <= datetime.date(today.year, today.month, today.day):
             start_date = current_date
             end_date = min(current_date + delta, datetime.date(today.year, today.month, today.day) + datetime.timedelta(days=1))

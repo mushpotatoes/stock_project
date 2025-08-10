@@ -43,7 +43,7 @@ PLOT_SMA_TIMEFRAMES = [15, 25, 100]
 # Logging & Warnings Setup
 # -----------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.CRITICAL,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         # logging.FileHandler(log_filename, 'a'), # Uncomment to log to a file
@@ -598,9 +598,12 @@ class StockDataProcessor:
         scaler_filename = os.path.join(scalers_dir, f"scaler_timeframe_{timeframe}.pkl")
         scaler = None
 
+        logging.info(f"Use saved scaler is {use_saved_scaler}")
+        logging.info(f"Does path exist? {os.path.exists(scaler_filename)}")
         # Load or fit StandardScaler
         if use_saved_scaler and os.path.exists(scaler_filename):
             try:
+                logging.info(f"Using scaler {scaler_filename}")
                 scaler = joblib.load(scaler_filename)
                 # Ensure columns for transformation match the scaler's features
                 cols_for_transform = [col for col in scaler.feature_names_in_ if col in new_cols_df.columns]
@@ -615,6 +618,7 @@ class StockDataProcessor:
             scaler = StandardScaler()
             new_cols_standardized = scaler.fit_transform(new_cols_df)
             joblib.dump(scaler, scaler_filename) # Save the newly fitted scaler
+        # exit()
         
         # Create a DataFrame for standardized columns
         # Remove '_norm' suffix if it was implicitly added by previous normalization steps
@@ -966,22 +970,21 @@ def main():
     mask_display = (processed_df['time'] >= start_plot_time) & (processed_df['time'] <= end_plot_time)
     processed_df_for_display = processed_df.loc[mask_display].copy().reset_index(drop=True)
 
-    file_path = "SPY_with_features.parquet"
-    # --- Saving the DataFrame ---
+    pickle_file_path = f"{symbol}_with_features.pkl"
+
     try:
-        processed_df_for_display.to_parquet(file_path, engine='pyarrow', compression='snappy')
-        print(f"DataFrame successfully saved to {file_path}")
-    except ImportError:
-        print("PyArrow or Fastparquet engine not found. Please install: pip install pyarrow")
+        processed_df_for_display.to_pickle(pickle_file_path)
+        print(f"DataFrame successfully saved to {pickle_file_path} using Pickle.")
     except Exception as e:
-        print(f"Error saving DataFrame to Parquet: {e}")
+        print(f"Error saving DataFrame to Pickle: {e}")
+
     
     logging.info("\nFirst 20 rows of the processed (normalized and standardized) DataFrame with predictions:")
     print(processed_df_for_display.head(n=20))
     logging.info(f"\nColumns in final DataFrame: {processed_df_for_display.columns.tolist()}")
 
-    # # Generate and save daily plots
-    # plot_daily_data(processed_df, start_plot_time, end_plot_time, symbol, save_dir=os.path.join(repo_root, "daily_plots"))
+    # Generate and save daily plots
+    plot_daily_data(processed_df, start_plot_time, end_plot_time, symbol, save_dir=os.path.join(repo_root, "daily_plots"))
 
 
 if __name__ == "__main__":
